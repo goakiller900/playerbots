@@ -108,8 +108,13 @@ void PlayerbotFactory::Init()
     }
 }
 
-void PlayerbotFactory::Prepare()
+void PlayerbotFactory::Prepare(bool preserveLevel)
 {
+    if (sPlayerbotAIConfig.naturalLevelingEnabled && sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        preserveLevel = true;
+        level = bot->GetLevel();
+    }
     /*if (!itemQuality)
     {
         if (level < 20)
@@ -147,7 +152,7 @@ void PlayerbotFactory::Prepare()
         }
     }*/
 
-    if (!sPlayerbotAIConfig.disableRandomLevels)
+    if (!sPlayerbotAIConfig.disableRandomLevels && !preserveLevel)
     {
         bot->SetLevel(level);
         //Reset xp and xp for next level.
@@ -166,12 +171,15 @@ void PlayerbotFactory::Prepare()
     }
 }
 
-void PlayerbotFactory::Randomize(bool incremental, bool syncWithMaster)
+void PlayerbotFactory::Randomize(bool incremental, bool syncWithMaster, bool forceInitialize)
 {
-    sLog.outDetail("Preparing to %s randomize...", (incremental ? "incremental" : "full"));
-    Prepare();
+    if (sPlayerbotAIConfig.naturalLevelingEnabled && sRandomPlayerbotMgr.IsRandomBot(bot) && !forceInitialize)
+        return;
 
-    if (sPlayerbotAIConfig.disableRandomLevels)
+    sLog.outDetail("Preparing to %s randomize...", (incremental ? "incremental" : "full"));
+    Prepare(forceInitialize);
+
+    if (sPlayerbotAIConfig.disableRandomLevels && !forceInitialize)
     {
         return;
     }

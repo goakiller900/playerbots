@@ -25,6 +25,8 @@
 #include "Guilds/GuildMgr.h"
 #include "World/WorldState.h"
 #include "PlayerbotLoginMgr.h"
+#include "RandomBotLifecycle.h"
+#include "RandomBotEstateService.h"
 #include "Entities/Transports.h"
 
 #ifndef MANGOSBOT_ZERO
@@ -39,6 +41,7 @@
 #include "playerbot/TravelMgr.h"
 #include <iomanip>
 #include <float.h>
+#include <numeric>
 
 #if PLATFORM == PLATFORM_WINDOWS
 #include "windows.h"
@@ -666,7 +669,11 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     if (!playersLevel)
         playersLevel = sPlayerbotAIConfig.syncLevelNoPlayer;
 
+    // Load archive/retirement exclusions before either login selector builds a candidate pool.
+    sRandomBotLifecycleMgr.Initialize();
+
     ScaleBotActivity();
+    sRandomBotLifecycleMgr.Update(0);
     if (sPlayerbotAIConfig.asyncBotLogin)
     {
         auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "AsyncBotLogin");
@@ -1128,6 +1135,34 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");    
     uint32 currentAllowedBotCount = maxAllowedBotCount;
 
+    std::vector<uint32> bracketDeficits;
+    if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+    {
+        std::vector<uint32> online(sPlayerbotAIConfig.levelBrackets.size(), 0);
+        ForEachPlayerbot([&](Player* bot)
+        {
+            if (!bot || !IsRandomBot(bot) || !sRandomBotLifecycleMgr.IsLoginEligible(bot->GetGUIDLow()))
+                return;
+            const int32 bracket = RandomBotLifecycleMath::FindLevelBracket(
+                sPlayerbotAIConfig.levelBrackets, bot->GetLevel());
+            if (bracket >= 0)
+                ++online[bracket];
+        });
+        const std::vector<uint32> targets = RandomBotLifecycleMath::CalculateBracketTargets(
+            sPlayerbotAIConfig.levelBrackets, maxAllowedBotCount);
+        bracketDeficits = RandomBotLifecycleMath::CalculateBracketDeficits(targets, online);
+        std::ostringstream distribution;
+        for (size_t i = 0; i < targets.size(); ++i)
+        {
+            if (i)
+                distribution << ", ";
+            distribution << sPlayerbotAIConfig.levelBrackets[i].minLevel << '-'
+                << sPlayerbotAIConfig.levelBrackets[i].maxLevel << ":" << online[i] << '/'
+                << targets[i] << " (-" << bracketDeficits[i] << ')';
+        }
+        sLog.outDetail("Random bot level brackets (online/target/deficit): %s", distribution.str().c_str());
+    }
+
     uint32 maxLevel = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
     float currentAvgLevel = 0, wantedAvgLevel = 0, randomAvgLevel = 0;
 
@@ -1198,12 +1233,22 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 {
                     result = CharacterDatabase.PQuery("SELECT guid, level, totaltime, race, class FROM characters WHERE account = '%u'", accountId);
                 }
+                else if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+                {
+                    // Bracket deficits replace average-level filtering. Applying
+                    // both can discard exactly the underrepresented levels.
+                    result = CharacterDatabase.PQuery(
+                        "SELECT guid, level, totaltime, race, class FROM characters WHERE account = '%u' AND level <= %u",
+                        accountId, maxLevel);
+                }
                 else
                 {
                     bool needToIncrease = wantedAvgLevel && currentAvgLevel + 1 < wantedAvgLevel;
                     bool needToLower = wantedAvgLevel && currentAvgLevel > wantedAvgLevel + 1;
-                    bool rndCanIncrease = !sPlayerbotAIConfig.disableRandomLevels && randomAvgLevel > currentAvgLevel;
-                    bool rndCanLower = !sPlayerbotAIConfig.disableRandomLevels && randomAvgLevel < currentAvgLevel;
+                    bool canRandomizeLevel = !sPlayerbotAIConfig.disableRandomLevels &&
+                        !sPlayerbotAIConfig.naturalLevelingEnabled;
+                    bool rndCanIncrease = canRandomizeLevel && randomAvgLevel > currentAvgLevel;
+                    bool rndCanLower = canRandomizeLevel && randomAvgLevel < currentAvgLevel;
 
                     std::string query = "SELECT guid, level, totaltime, race, class FROM characters WHERE account = '%u' AND level <= %u";
                     std::string wasRand = sPlayerbotAIConfig.instantRandomize ? "totaltime" : "(level > 1)";
@@ -1238,6 +1283,9 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                     uint32 race = fields[3].GetUInt32();
                     uint32 cls = fields[4].GetUInt32();
 
+                    if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+                        continue;
+
                     if (GetEventValue(guid, "add"))
                     {
                         if (!noCriteria)
@@ -1262,7 +1310,22 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                         continue;
                     }
 
-                    if (classRaceAllowed[cls][race] <= 0)
+                    int32 levelBracket = -1;
+                    bool bracketRequired = false;
+                    if (sPlayerbotAIConfig.levelBracketBalancingEnabled && noCriteria < 2)
+                    {
+                        levelBracket = RandomBotLifecycleMath::FindLevelBracket(
+                            sPlayerbotAIConfig.levelBrackets, level);
+                        if (levelBracket < 0 || bracketDeficits[levelBracket] == 0)
+                            continue;
+                        bracketRequired = true;
+                    }
+
+                    // First pass preserves class/race quotas. The second pass lets a
+                    // level-bracket deficit take priority. The final pass is the
+                    // existing unrestricted fallback so the server can still fill.
+                    if (classRaceAllowed[cls][race] <= 0 &&
+                        !(sPlayerbotAIConfig.levelBracketBalancingEnabled && noCriteria == 1 && bracketRequired))
                         continue;
 
                     SetEventValue(guid, "add", 1, urand(sPlayerbotAIConfig.minRandomBotInWorldTime, sPlayerbotAIConfig.maxRandomBotInWorldTime));
@@ -1271,6 +1334,9 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
 
                     if(!noCriteria)
                         classRaceAllowed[cls][race]--;
+
+                    if (levelBracket >= 0 && bracketDeficits[levelBracket])
+                        --bracketDeficits[levelBracket];
 
                     if (wantedAvgLevel)
                     {
@@ -1298,6 +1364,14 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             if (showLoginWarning && neededAddBots > 0)
             {
                 sLog.outError("Not enough accounts to meet selection criteria. A random selection of bots was activated to fill the server.");
+
+                if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+                {
+                    uint32 remainingBracketDeficit = std::accumulate(bracketDeficits.begin(), bracketDeficits.end(), uint32(0));
+                    if (remainingBracketDeficit)
+                        sLog.outError("Level-bracket selection could not find enough eligible bots (%u target slots remain); falling back to legacy selection.",
+                            remainingBracketDeficit);
+                }
 
                 if (sPlayerbotAIConfig.syncLevelWithPlayers)
                     sLog.outError("Only bots between level %d and %d are selected to sync with player level", uint32((currentAvgLevel + 1 < wantedAvgLevel) ? wantedAvgLevel : 1), maxLevel);
@@ -2170,6 +2244,9 @@ void RandomPlayerbotMgr::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
 
 bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 {
+    if (!sRandomBotLifecycleMgr.IsLoginEligible(bot))
+        return false;
+
     Player* player = GetPlayerBot(bot);
     if (player && sPlayerbotAIConfig.IsFreeAltBot(player))
     {
@@ -2256,7 +2333,8 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
             ai->GetAiObjectContext()->ClearExpiredValues();
 
         //Randomize/teleport bot
-        if (!sPlayerbotAIConfig.disableRandomLevels)
+        if (!sPlayerbotAIConfig.disableRandomLevels ||
+            (sPlayerbotAIConfig.naturalLevelingEnabled && IsRandomBot(player)))
         {
             if (player->GetGroup() || player->IsTaxiFlying())
                 return false;
@@ -2291,6 +2369,9 @@ bool RandomPlayerbotMgr::ProcessBot(Player* player)
         return false;
 
     uint32 bot = player->GetGUIDLow();
+
+    if (!sRandomBotLifecycleMgr.IsLoginEligible(bot))
+        return false;
 
     if (player->InBattleGround())
         return false;
@@ -3035,6 +3116,32 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
     if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetSession()->isLogingOut())
         return;
 
+    if (!sRandomBotLifecycleMgr.IsLoginEligible(bot->GetGUIDLow()))
+        return;
+
+    if (sPlayerbotAIConfig.naturalLevelingEnabled && IsRandomBot(bot))
+    {
+        if (!GetValue(bot, "natural_initialized"))
+        {
+            uint32 newCharacterCeiling = std::max(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL),
+                sPlayerbotAIConfig.randombotStartingLevel);
+#ifdef MANGOSBOT_TWO
+            if (bot->getClass() == CLASS_DEATH_KNIGHT)
+                newCharacterCeiling = std::max(newCharacterCeiling,
+                    sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL));
+#endif
+            if (bot->GetTotalPlayedTime() == 0 && bot->GetUInt32Value(PLAYER_XP) == 0 &&
+                bot->GetLevel() <= newCharacterCeiling)
+                RandomizeFirst(bot);
+            else
+                SetValue(bot, "natural_initialized", 1); // Adopt an existing progressed character without changing it.
+        }
+        else
+            SetEventValue(bot->GetGUIDLow(), "randomize", 1,
+                urand(sPlayerbotAIConfig.minRandomBotRandomizeTime, sPlayerbotAIConfig.maxRandomBotRandomizeTime));
+        return;
+    }
+
     bool initialRandom = false;
     if (bot->GetLevel() <= sPlayerbotAIConfig.randombotStartingLevel)
         initialRandom = true;
@@ -3073,6 +3180,9 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
 
 void RandomPlayerbotMgr::UpdateGearSpells(Player* bot)
 {
+    if (sPlayerbotAIConfig.naturalLevelingEnabled && IsRandomBot(bot))
+        return;
+
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "UpgradeGear");
 
     uint32 maxLevel = sPlayerbotAIConfig.randomBotMaxLevel;
@@ -3094,6 +3204,8 @@ void RandomPlayerbotMgr::UpdateGearSpells(Player* bot)
 
 void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 {
+    const bool naturalLeveling = sPlayerbotAIConfig.naturalLevelingEnabled && IsRandomBot(bot);
+    bool bracketLevelSelected = false;
     uint32 maxLevel = sPlayerbotAIConfig.randomBotMaxLevel;
     if (maxLevel > sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
         maxLevel = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
@@ -3103,14 +3215,95 @@ void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
         maxLevel = std::max(sPlayerbotAIConfig.randomBotMinLevel, std::min(playersLevel+ sPlayerbotAIConfig.syncLevelMaxAbove, sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL)));
 
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "RandomizeFirst");
-    uint32 level = urand(std::max(uint32(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL)), sPlayerbotAIConfig.randomBotMinLevel), maxLevel);
+    uint32 minLevel = std::max(uint32(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL)),
+        sPlayerbotAIConfig.randomBotMinLevel);
+    maxLevel = std::max(minLevel, maxLevel);
+#ifdef MANGOSBOT_TWO
+    if (sPlayerbotAIConfig.levelBracketInitialRandomizationEnabled && bot->getClass() == CLASS_DEATH_KNIGHT)
+    {
+        minLevel = std::max(minLevel, sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL));
+        maxLevel = std::max(minLevel, maxLevel);
+    }
+#endif
+    uint32 level = urand(minLevel, maxLevel);
+
+    if (naturalLeveling)
+    {
+        if (GetValue(bot, "natural_initialized"))
+            return;
+        uint32 newCharacterCeiling = std::max(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL),
+            sPlayerbotAIConfig.randombotStartingLevel);
+#ifdef MANGOSBOT_TWO
+        if (bot->getClass() == CLASS_DEATH_KNIGHT)
+            newCharacterCeiling = std::max(newCharacterCeiling,
+                sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL));
+#endif
+        if (bot->GetTotalPlayedTime() != 0 || bot->GetUInt32Value(PLAYER_XP) != 0 || bot->GetLevel() > newCharacterCeiling)
+        {
+            SetValue(bot, "natural_initialized", 1);
+            return;
+        }
+        // Natural starts are independent of legacy random-level selection limits.
+        level = std::min(sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL),
+            std::max(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL),
+                sPlayerbotAIConfig.randombotStartingLevel));
+    }
+    else if (sPlayerbotAIConfig.levelBracketInitialRandomizationEnabled && IsRandomBot(bot) &&
+        bot->GetTotalPlayedTime() == 0 && bot->GetUInt32Value(PLAYER_XP) == 0)
+    {
+        std::vector<uint32> online(sPlayerbotAIConfig.levelBrackets.size(), 0);
+        ForEachPlayerbot([&](Player* onlineBot)
+        {
+            if (!onlineBot || !IsRandomBot(onlineBot) || onlineBot == bot ||
+                !sRandomBotLifecycleMgr.IsLoginEligible(onlineBot->GetGUIDLow()))
+                return;
+            const int32 bracket = RandomBotLifecycleMath::FindLevelBracket(
+                sPlayerbotAIConfig.levelBrackets, onlineBot->GetLevel());
+            if (bracket >= 0)
+                ++online[bracket];
+        });
+        std::vector<uint32> deficits = RandomBotLifecycleMath::CalculateBracketDeficits(
+            RandomBotLifecycleMath::CalculateBracketTargets(sPlayerbotAIConfig.levelBrackets,
+                GetEventValue(0, "bot_count")), online);
+
+        uint32 totalDeficit = 0;
+        for (size_t i = 0; i < deficits.size(); ++i)
+        {
+            const RandomBotLevelBracket& bracket = sPlayerbotAIConfig.levelBrackets[i];
+            if (bracket.maxLevel >= minLevel && bracket.minLevel <= maxLevel)
+                totalDeficit += deficits[i];
+        }
+        if (totalDeficit)
+        {
+            uint32 roll = urand(1, totalDeficit);
+            for (size_t i = 0; i < deficits.size(); ++i)
+            {
+                const RandomBotLevelBracket& bracket = sPlayerbotAIConfig.levelBrackets[i];
+                if (bracket.maxLevel < minLevel || bracket.minLevel > maxLevel || !deficits[i])
+                    continue;
+                if (roll > deficits[i])
+                {
+                    roll -= deficits[i];
+                    continue;
+                }
+                level = urand(std::max(minLevel, bracket.minLevel), std::min(maxLevel, bracket.maxLevel));
+                bracketLevelSelected = true;
+                break;
+            }
+        }
+    }
 
 #ifdef MANGOSBOT_TWO
     if (bot->getClass() == CLASS_DEATH_KNIGHT)
-        level = urand(std::max(bot->GetLevel(), sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL)), std::max(sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL), maxLevel));
+    {
+        const uint32 heroicStart = sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL);
+        level = (naturalLeveling || bracketLevelSelected) ? std::max(level, heroicStart) :
+            urand(std::max(bot->GetLevel(), heroicStart), std::max(heroicStart, maxLevel));
+    }
 #endif
 
-    if (urand(0, 100) < 100 * sPlayerbotAIConfig.randomBotMaxLevelChance && level < maxLevel)
+    if (!naturalLeveling && !bracketLevelSelected &&
+        urand(0, 100) < 100 * sPlayerbotAIConfig.randomBotMaxLevelChance && level < maxLevel)
         level = maxLevel;
 
 #ifndef MANGOSBOT_ZERO
@@ -3124,16 +3317,25 @@ void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
         return;
 
     // only randomise death knights to min lvl 60
-    if (bot->getClass() == CLASS_DEATH_KNIGHT && level < 60)
+    if (!naturalLeveling && !bracketLevelSelected && bot->getClass() == CLASS_DEATH_KNIGHT && level < 60)
         level = 60;
 #endif
 
-    if (level == sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL))
+    if (!naturalLeveling && level == sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL))
         return;
 
     SetValue(bot, "level", level);
+    if (naturalLeveling)
+    {
+        bot->SetLevel(level);
+        bot->SetUInt32Value(PLAYER_XP, 0);
+        bot->SetUInt32Value(PLAYER_NEXT_LEVEL_XP, sObjectMgr.GetXPForLevel(level));
+    }
     PlayerbotFactory factory(bot, level);
-    factory.Randomize(false, false);
+    factory.Randomize(false, false, naturalLeveling);
+
+    if (naturalLeveling)
+        SetValue(bot, "natural_initialized", 1);
 
     // schedule randomise
     uint32 randomTime = urand(sPlayerbotAIConfig.minRandomBotRandomizeTime, sPlayerbotAIConfig.maxRandomBotRandomizeTime);
@@ -3185,7 +3387,7 @@ void RandomPlayerbotMgr::Refresh(Player* bot)
         bot->GetPlayerbotAI()->ResetStrategies();
     }
 
-    if (sPlayerbotAIConfig.disableRandomLevels)
+    if (sPlayerbotAIConfig.disableRandomLevels || (sPlayerbotAIConfig.naturalLevelingEnabled && IsRandomBot(bot)))
         return;
 
     if (bot->InBattleGround())
@@ -3219,6 +3421,8 @@ void RandomPlayerbotMgr::Refresh(Player* bot)
 
 bool RandomPlayerbotMgr::IsRandomBot(Player* bot)
 {
+    if (bot && sRandomBotEstateService.IsServiceCharacter(bot->GetGUIDLow()))
+        return false;
     if (bot && bot->GetPlayerbotAI())
     {
         if (bot->GetPlayerbotAI()->IsRealPlayer())
@@ -3237,6 +3441,8 @@ bool RandomPlayerbotMgr::IsRandomBot(Player* bot)
 
 bool RandomPlayerbotMgr::IsRandomBot(uint32 bot)
 {
+    if (sRandomBotEstateService.IsServiceCharacter(bot))
+        return false;
     ObjectGuid guid = ObjectGuid(HIGHGUID_PLAYER, bot);
     if (sPlayerbotAIConfig.IsInRandomAccountList(sObjectMgr.GetPlayerAccountIdByGUID(guid)))
         return true;
@@ -3246,6 +3452,7 @@ bool RandomPlayerbotMgr::IsRandomBot(uint32 bot)
 
 std::list<uint32> RandomPlayerbotMgr::GetBots()
 {
+    currentBots.remove_if([](uint32 guid) { return !sRandomBotLifecycleMgr.IsLoginEligible(guid); });
     if (!currentBots.empty()) return currentBots;
 
     auto results = CharacterDatabase.Query(
@@ -3257,7 +3464,8 @@ std::list<uint32> RandomPlayerbotMgr::GetBots()
         {
             Field* fields = results->Fetch();
             uint32 bot = fields[0].GetUInt32();
-            currentBots.push_back(bot);
+            if (sRandomBotLifecycleMgr.IsLoginEligible(bot))
+                currentBots.push_back(bot);
         } while (results->NextRow());
     }
 
@@ -3307,7 +3515,9 @@ uint32 RandomPlayerbotMgr::GetEventValue(uint32 bot, std::string event)
     }
     CachedEvent e = eventCache[bot][event];
 
-    if ((time(0) - e.lastChangeTime) >= e.validIn && event != "specNo" && event != "specLink" && event != "init" && event != "current_time" && event != "always" && event != "selfbot")
+    if ((time(0) - e.lastChangeTime) >= e.validIn && event != "specNo" && event != "specLink" &&
+        event != "init" && event != "current_time" && event != "always" && event != "selfbot" &&
+        event != "natural_initialized")
         e.value = 0;
 
     return e.value;

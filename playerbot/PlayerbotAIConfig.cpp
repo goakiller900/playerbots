@@ -367,6 +367,29 @@ bool PlayerbotAIConfig::Initialize()
         levelProbability[level] = config.GetIntDefault("AiPlayerbot.LevelProbability." + std::to_string(level), 100);
     }
 
+    levelBracketBalancingEnabled = config.GetBoolDefault("AiPlayerbot.LevelBracketBalancing.Enabled", false);
+    levelBracketInitialRandomizationEnabled = config.GetBoolDefault(
+        "AiPlayerbot.LevelBracketInitialRandomization.Enabled", false);
+    if (levelBracketBalancingEnabled || levelBracketInitialRandomizationEnabled)
+    {
+        std::string bracketError;
+        if (!RandomBotLifecycleMath::ParseLevelBrackets(
+            config.GetStringDefault("AiPlayerbot.LevelBrackets", ""),
+            config.GetStringDefault("AiPlayerbot.LevelBracketBalance", ""),
+            sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL), levelBrackets, bracketError))
+        {
+            sLog.outError("Invalid random-bot level bracket configuration: %s. "
+                "Bracket balancing and bracket-aware initial randomization are disabled.", bracketError.c_str());
+            levelBracketBalancingEnabled = false;
+            levelBracketInitialRandomizationEnabled = false;
+            levelBrackets.clear();
+        }
+        else
+        {
+            sLog.outString("Loaded %u random-bot level brackets", static_cast<uint32>(levelBrackets.size()));
+        }
+    }
+
     sLog.outString("Loading Race/Class probabilities");
 
     classRaceProbabilityTotal = 0;
@@ -514,7 +537,8 @@ bool PlayerbotAIConfig::Initialize()
 
 	//SPP switches
     enableGreet = config.GetBoolDefault("AiPlayerbot.EnableGreet", false);
-	disableRandomLevels = config.GetBoolDefault("AiPlayerbot.DisableRandomLevels", false);
+    disableRandomLevels = config.GetBoolDefault("AiPlayerbot.DisableRandomLevels", false);
+    naturalLevelingEnabled = config.GetBoolDefault("AiPlayerbot.NaturalLeveling.Enabled", false);
     instantRandomize = config.GetBoolDefault("AiPlayerbot.InstantRandomize", true);
     randomBotRandomPassword = config.GetBoolDefault("AiPlayerbot.RandomBotRandomPassword", true);
     playerbotsXPrate = config.GetFloatDefault("AiPlayerbot.XPRate", 1.0f);
@@ -530,6 +554,81 @@ bool PlayerbotAIConfig::Initialize()
     RandombotsWalkingRPGInDoors = config.GetBoolDefault("AiPlayerbot.RandombotsWalkingRPG.InDoors", false);
     minEnchantingBotLevel = config.GetIntDefault("AiPlayerbot.minEnchantingBotLevel", 60);
     randombotStartingLevel = config.GetIntDefault("AiPlayerbot.randombotStartingLevel", 5);
+    retirementEnabled = config.GetBoolDefault("AiPlayerbot.Retirement.Enabled", false);
+    retirementAllianceBrokerGuid = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Alliance.Guid", 0));
+    retirementAllianceBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Alliance.Account", 0));
+    retirementHordeBrokerGuid = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Horde.Guid", 0));
+    retirementHordeBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Horde.Account", 0));
+    retirementCheckInterval = std::max(1, config.GetIntDefault("AiPlayerbot.Retirement.CheckInterval", 300));
+    retirementMinMaxLevelTime = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.MinMaxLevelTime", 2592000));
+    retirementMaxPerCycle = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.MaxPerCycle", 1));
+    retirementMaxLevelPopulationPercent = std::max(0, std::min(100,
+        config.GetIntDefault("AiPlayerbot.Retirement.MaxLevelPopulationPercent", 35)));
+    retirementAuctionAttempts = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.AuctionAttempts", 3));
+    retirementAuctionDiscountPercentPerAttempt = std::max(0, std::min(100,
+        config.GetIntDefault("AiPlayerbot.Retirement.AuctionDiscountPercentPerAttempt", 10)));
+    retirementGoldSinkMinPercent = std::max(0, std::min(100,
+        config.GetIntDefault("AiPlayerbot.Retirement.GoldSinkMinPercent", 40)));
+    retirementGoldSinkMaxPercent = std::max(0, std::min(100,
+        config.GetIntDefault("AiPlayerbot.Retirement.GoldSinkMaxPercent", 65)));
+    retirementInheritanceMinRecipients = std::max(0,
+        config.GetIntDefault("AiPlayerbot.Retirement.InheritanceMinRecipients", 5));
+    retirementInheritanceMaxRecipients = std::max(0,
+        config.GetIntDefault("AiPlayerbot.Retirement.InheritanceMaxRecipients", 20));
+    retirementMaxInheritancePerBot = static_cast<uint64>(std::max(0,
+        config.GetIntDefault("AiPlayerbot.Retirement.MaxInheritancePerBot", 10000000)));
+    retirementCreateReplacement = config.GetBoolDefault("AiPlayerbot.Retirement.CreateReplacement", true);
+
+    const std::string retirementDispositionValue = boost::algorithm::to_lower_copy(
+        boost::algorithm::trim_copy(config.GetStringDefault("AiPlayerbot.Retirement.CharacterDisposition", "archive")));
+    if (retirementDispositionValue == "delete")
+        retirementDisposition = RandomBotCharacterDisposition::DELETE;
+    else
+    {
+        retirementDisposition = RandomBotCharacterDisposition::ARCHIVE;
+        if (retirementDispositionValue != "archive")
+        {
+            sLog.outError("Invalid AiPlayerbot.Retirement.CharacterDisposition '%s'; using safe archive mode",
+                retirementDispositionValue.c_str());
+            retirementEnabled = false;
+        }
+    }
+
+    const std::string unsellablePolicyValue = boost::algorithm::to_lower_copy(
+        boost::algorithm::trim_copy(config.GetStringDefault("AiPlayerbot.Retirement.UnsellableItemPolicy", "retain")));
+    if (unsellablePolicyValue == "destroy")
+        retirementUnsellableItemPolicy = RandomBotUnsellableItemPolicy::DESTROY;
+    else
+    {
+        retirementUnsellableItemPolicy = RandomBotUnsellableItemPolicy::RETAIN;
+        if (unsellablePolicyValue != "retain")
+        {
+            sLog.outError("Invalid AiPlayerbot.Retirement.UnsellableItemPolicy '%s'; using safe retain policy",
+                unsellablePolicyValue.c_str());
+            retirementEnabled = false;
+        }
+    }
+
+    if (retirementGoldSinkMinPercent > retirementGoldSinkMaxPercent)
+    {
+        sLog.outError("AiPlayerbot.Retirement.GoldSinkMinPercent exceeds GoldSinkMaxPercent; retirement disabled");
+        retirementEnabled = false;
+    }
+    if (retirementInheritanceMinRecipients > retirementInheritanceMaxRecipients)
+    {
+        sLog.outError("AiPlayerbot.Retirement.InheritanceMinRecipients exceeds InheritanceMaxRecipients; retirement disabled");
+        retirementEnabled = false;
+    }
+    // Retained items belong to the independent broker estate. Original-character
+    // deletion requires complete asset detachment, not a forced destroy policy.
+
+#ifdef GenerateBotTests
+    std::string lifecycleMathTestError;
+    if (!RunRandomBotLifecycleMathTests(lifecycleMathTestError))
+        sLog.outError("Random bot lifecycle calculation tests failed: %s", lifecycleMathTestError.c_str());
+    else
+        sLog.outString("Random bot lifecycle calculation tests passed");
+#endif
     gearscorecheck = config.GetBoolDefault("AiPlayerbot.GearScoreCheck", false);
     levelCheck = config.GetIntDefault("AiPlayerbot.LevelCheck", 30);
 	randomBotPreQuests = config.GetBoolDefault("AiPlayerbot.PreQuests", true);

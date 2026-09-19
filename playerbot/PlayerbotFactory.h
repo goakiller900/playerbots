@@ -50,7 +50,7 @@ public:
     static ObjectGuid GetRandomBot();
     static void Init();
     void Refresh();
-    void Randomize(bool incremental, bool syncWithMaster);
+    void Randomize(bool incremental, bool syncWithMaster, bool forceInitialize = false);
     static std::list<uint32> classQuestIds;
     static std::list<uint32> specialQuestIds;
     void InitSkills();
@@ -68,7 +68,7 @@ public:
     void InitPetSpells();
 
 private:
-    void Prepare();
+    void Prepare(bool preserveLevel = false);
     void InitSecondEquipmentSet();
     void Shuffle(std::vector<uint32>& items);
     void InitEquipment(bool incremental, bool syncWithMaster, bool progressive = sPlayerbotAIConfig.randomGearProgression, bool partialUpgrade = false);

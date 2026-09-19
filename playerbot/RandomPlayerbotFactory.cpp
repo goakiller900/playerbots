@@ -9,6 +9,7 @@
 #include "PlayerbotAI.h"
 #include "Entities/Player.h"
 #include "RandomPlayerbotFactory.h"
+#include "RandomBotEstateService.h"
 #include "SystemConfig.h"
 #include "Social/SocialMgr.h"
 #include "Guilds/GuildMgr.h"
@@ -502,6 +503,29 @@ void RandomPlayerbotFactory::EnsureNamesInitialized()
 
 void RandomPlayerbotFactory::CreateRandomBots()
 {
+    sRandomBotEstateService.Initialize();
+    if (sRandomBotEstateService.HasServiceAccounts())
+    {
+        // This factory can delete whole accounts before it builds the random
+        // account cache. A reserved broker must never fall under its prefix.
+        std::string prefix = sPlayerbotAIConfig.randomBotAccountPrefix;
+        LoginDatabase.escape_string(prefix);
+        auto candidates = LoginDatabase.PQuery("SELECT a.id FROM (SELECT 1) seed "
+            "LEFT JOIN account a ON a.username LIKE '%s%%'", prefix.c_str());
+        if (!candidates)
+        {
+            sLog.outError("Random bot provisioning stopped: unable to verify estate service account exclusions.");
+            return;
+        }
+        do
+        {
+            if (!candidates->Fetch()[0].IsNULL() && sRandomBotEstateService.IsServiceAccount(candidates->Fetch()[0].GetUInt32()))
+            {
+                sLog.outError("Random bot provisioning stopped: account prefix includes a permanent estate broker account.");
+                return;
+            }
+        } while (candidates->NextRow());
+    }
     EnsureNamesInitialized();
 
     // check if scheduled for delete

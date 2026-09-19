@@ -16,6 +16,7 @@ namespace ai
 		int32 totalSpace;
 		int32 classRaceBucket[MAX_CLASSES][MAX_RACES];
 		int32 levelBucket[DEFAULT_MAX_LEVEL + 1];
+        std::vector<int32> levelBracketBucket;
 		RealPlayerInfos realPlayerInfos;
 	};
 
@@ -51,6 +52,7 @@ namespace ai
 		RANDOM_TIMED_OFFLINE,
 		CLASSRACE,
 		LEVEL,
+        LEVEL_BRACKET,
 		RANGE,
 		MAP,
 		GROUP,
@@ -70,6 +72,7 @@ namespace ai
 		,{LoginCriterionFailType::RANDOM_TIMED_OFFLINE , "RANDOM_TIMED_OFFLINE"}
 		,{LoginCriterionFailType::CLASSRACE, "CLASSRACE"}
 		,{LoginCriterionFailType::LEVEL, "LEVEL"}
+        ,{LoginCriterionFailType::LEVEL_BRACKET, "LEVEL_BRACKET"}
 		,{LoginCriterionFailType::RANGE , "RANGE"}
 		,{LoginCriterionFailType::MAP , "MAP"}
 		,{LoginCriterionFailType::GUILD , "GUILD"}
@@ -93,6 +96,7 @@ namespace ai
 		uint8 GetRace() const { return race; }
 		uint8 GetClass() const { return cls; }
 		uint32 GetLevel() const;
+        int32 GetLevelBracket() const;
 		Player* GetPlayer() const { return sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false); }
 		bool IsNearPlayer(const LoginSpace& space) const;
 		bool IsOnPlayerMap(const LoginSpace& space) const;
@@ -117,6 +121,7 @@ namespace ai
 		LoginCriterionFailType MatchNoCriteria(const LoginSpace& space, const LoginCriteria& criteria) const;
 
 		void Update(Player* player);
+        void RefreshLifecycleState();
 		bool LoginBot();
 		bool LogoutBot();
 	private:

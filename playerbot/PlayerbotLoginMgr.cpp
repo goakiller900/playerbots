@@ -3,6 +3,7 @@
 #include "PlayerbotMgr.h"
 #include "PlayerbotAIConfig.h"
 #include "RandomPlayerbotMgr.h"
+#include "RandomBotLifecycle.h"
 
 using namespace ai;
 
@@ -42,6 +43,18 @@ PlayerLoginInfo::PlayerLoginInfo(Player* player) : PlayerLoginInfo(player->GetSe
 
 uint32 PlayerLoginInfo::GetLevel() const
 {
+    if (isNew && sPlayerbotAIConfig.naturalLevelingEnabled)
+    {
+        uint32 startingLevel = std::max(sWorld.getConfig(CONFIG_UINT32_START_PLAYER_LEVEL),
+            sPlayerbotAIConfig.randombotStartingLevel);
+#ifdef MANGOSBOT_TWO
+        if (cls == CLASS_DEATH_KNIGHT)
+            startingLevel = std::max(startingLevel,
+                sWorld.getConfig(CONFIG_UINT32_START_HEROIC_PLAYER_LEVEL));
+#endif
+        return std::min(startingLevel, sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL));
+    }
+
     if (!isNew || sPlayerbotAIConfig.disableRandomLevels)
         return level;
 
@@ -52,6 +65,11 @@ uint32 PlayerLoginInfo::GetLevel() const
     maxRandomLevel = std::max(sPlayerbotAIConfig.randomBotMinLevel, std::min(sRandomPlayerbotMgr.GetPlayersLevel() + sPlayerbotAIConfig.syncLevelMaxAbove, sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL)));
 
     return (minRandomLevel + maxRandomLevel) / 2;
+}
+
+int32 PlayerLoginInfo::GetLevelBracket() const
+{
+    return RandomBotLifecycleMath::FindLevelBracket(sPlayerbotAIConfig.levelBrackets, GetLevel());
 }
 
 bool PlayerLoginInfo::IsNearPlayer(const LoginSpace& space) const
@@ -174,6 +192,8 @@ bool PlayerLoginInfo::SendHolder()
     if (!lqh->Initialize())
     {
         delete holder;                                      // delete all unprocessed queries
+        holder = nullptr;
+        holderState = HolderState::HOLDER_EMPTY;
         return false;
     }
 
@@ -187,6 +207,17 @@ void PlayerLoginInfo::HandlePlayerBotLoginCallback(QueryResult* /*dummy*/, SqlQu
     if (!holder)
     {
         holderState = HolderState::HOLDER_EMPTY;
+        return;
+    }
+
+    // A lifecycle transition can happen while this asynchronous holder is in
+    // flight. Do not let a stale login request resurrect a retiring bot.
+    if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+    {
+        delete holder;
+        this->holder = nullptr;
+        holderState = HolderState::HOLDER_EMPTY;
+        loginState = LoginState::BOT_OFFLINE;
         return;
     }
   
@@ -213,6 +244,9 @@ void PlayerLoginInfo::FillLoginSpace(LoginSpace& space, FillStep step) const
     space.totalSpace--;
     space.classRaceBucket[cls][race]--;
     space.levelBucket[GetLevel()]--;
+    const int32 bracket = GetLevelBracket();
+    if (bracket >= 0 && static_cast<size_t>(bracket) < space.levelBracketBucket.size())
+        space.levelBracketBucket[bracket]--;
 };
 
 void PlayerLoginInfo::EmptyLoginSpace(LoginSpace& space, FillStep step) const
@@ -226,6 +260,9 @@ void PlayerLoginInfo::EmptyLoginSpace(LoginSpace& space, FillStep step) const
     space.totalSpace++;
     space.classRaceBucket[cls][race]++;
     space.levelBucket[GetLevel()]++;
+    const int32 bracket = GetLevelBracket();
+    if (bracket >= 0 && static_cast<size_t>(bracket) < space.levelBracketBucket.size())
+        space.levelBracketBucket[bracket]++;
 };
 
 void PlayerLoginInfo::SetQueue(bool isWanted, LoginSpace& space)
@@ -288,10 +325,32 @@ void PlayerLoginInfo::Update(Player* player)
     guildId = player->GetGuildId();
 }
 
+void PlayerLoginInfo::RefreshLifecycleState()
+{
+    if (Player* player = GetPlayer())
+        Update(player);
+    else
+    {
+        loginState = LoginState::BOT_OFFLINE;
+        if (holderState == HolderState::HOLDER_RECEIVED)
+        {
+            delete holder;
+            holder = nullptr;
+            holderState = HolderState::HOLDER_EMPTY;
+        }
+    }
+}
+
 bool PlayerLoginInfo::LoginBot()
 {
     if (loginState != LoginState::BOT_ON_LOGINQUEUE)
         return false;
+
+    if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+    {
+        RefreshLifecycleState();
+        return false;
+    }
 
     if (holderState != HolderState::HOLDER_RECEIVED)
         return false;
@@ -460,6 +519,8 @@ void PlayerBotLoginMgr::SendHolders(const BotInfos& queue)
 
     for (auto& info : queue)
     {
+        if (!sRandomBotLifecycleMgr.IsLoginEligible(info->GetId()))
+            continue;
         if (sRandomPlayerbotMgr.GetDatabaseDelay("CharacterDatabase") > 100)
             break;
         info->SendHolder();
@@ -472,6 +533,8 @@ void PlayerBotLoginMgr::SendHolders(BotPool* pool)
 
     for (auto& [guid, info] : *pool)
     {
+        if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+            continue;
         if (sRandomPlayerbotMgr.GetDatabaseDelay("CharacterDatabase") > 100)
             break;
         info.SendHolder();
@@ -486,6 +549,12 @@ void PlayerBotLoginMgr::UpdateOnlineBots()
         if(player)
             info->Update(player);
     }
+
+    // Retiring bots are owned by the lifecycle manager, but still consume an
+    // online slot while their auctions/mail are being settled.
+    for (auto& [guid, info] : botPool)
+        if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+            info.RefreshLifecycleState();
 }
 
 #define ADD_CRITERIA(type, condition) criteria.push_back(std::make_pair(LoginCriterionFailType::type, []( const PlayerLoginInfo& info, const LoginSpace& space) {return condition;}))
@@ -512,6 +581,20 @@ LoginCriteria PlayerBotLoginMgr::GetLoginCriteria(const uint8 attempt)
     std::vector<std::string> attemptCriteria = GetVariableLoginCriteria(attempt);
     configCriteria.insert(configCriteria.end(), attemptCriteria.begin(), attemptCriteria.end());
 
+    // The built-in fallback criteria predate the config list parser and are
+    // stored as comma-joined strings. Expand them only for the opt-in bracket
+    // path so legacy async selection remains unchanged when the feature is off.
+    if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+    {
+        std::vector<std::string> expanded;
+        for (const std::string& criterion : configCriteria)
+        {
+            std::vector<std::string> parts = split(criterion, ',');
+            expanded.insert(expanded.end(), parts.begin(), parts.end());
+        }
+        configCriteria.swap(expanded);
+    }
+
     for (auto& criterion : configCriteria)
     {
         if (criterion == "maxbots")
@@ -533,7 +616,13 @@ LoginCriteria PlayerBotLoginMgr::GetLoginCriteria(const uint8 attempt)
         if (criterion == "classrace")
             ADD_CRITERIA(CLASSRACE, space.classRaceBucket[info.GetClass()][info.GetRace()] <= 0);
         if (criterion == "level")
-            ADD_CRITERIA(LEVEL, space.levelBucket[info.GetLevel()] <= 0);
+        {
+            if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+                ADD_CRITERIA(LEVEL_BRACKET, !info.IsOnline() && (info.GetLevelBracket() < 0 ||
+                    space.levelBracketBucket[info.GetLevelBracket()] <= 0));
+            else
+                ADD_CRITERIA(LEVEL, space.levelBucket[info.GetLevel()] <= 0);
+        }
         if (criterion == "range")
             ADD_KEEP_CRITERIA(RANGE, info.IsNearPlayer(space));
         if (criterion == "map")
@@ -566,6 +655,13 @@ void PlayerBotLoginMgr::FillLoginSpace(BotPool* pool, LoginSpace& space, FillSte
         space.levelBucket[level] = GetLevelBucketSize(level);
     }
 
+    if (sPlayerbotAIConfig.levelBracketBalancingEnabled)
+    {
+        const std::vector<uint32> targets = RandomBotLifecycleMath::CalculateBracketTargets(
+            sPlayerbotAIConfig.levelBrackets, GetMaxOnlineBotCount());
+        space.levelBracketBucket.assign(targets.begin(), targets.end());
+    }
+
     for (uint32 race = 1; race < MAX_RACES; ++race)
     {
         for (uint32 cls = 1; cls < MAX_CLASSES; ++cls)
@@ -592,6 +688,7 @@ bool PlayerBotLoginMgr::CriteriaStillValid(const LoginCriterionFailType oldFailT
     case LoginCriterionFailType::SPARE_ROOM:
     case LoginCriterionFailType::CLASSRACE:
     case LoginCriterionFailType::LEVEL:
+    case LoginCriterionFailType::LEVEL_BRACKET:
         return false;
     };
 
@@ -620,6 +717,9 @@ BotInfos PlayerBotLoginMgr::FillLoginLogoutQueue(BotPool* pool, const RealPlayer
 
         for (auto& [guid, botInfo] : *pool)
         {
+            if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+                continue; // The lifecycle manager exclusively owns in-progress and archived bots.
+
             if (CriteriaStillValid(loginFails[guid], criteria))
                 continue;
 

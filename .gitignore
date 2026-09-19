@@ -121,3 +121,8 @@ ipch
 
 botpch.pch
 /.vs
+
+# Exact core checkout used for lifecycle compatibility validation.
+/.core-reference/
+/.validation-tools/
+!core-patches/*.patch

@@ -4,6 +4,7 @@
 #include "Talentspec.h"
 #include "Globals/SharedDefines.h"
 #include "SystemConfig.h"
+#include "RandomBotLifecycle.h"
 
 class Player;
 class PlayerbotMgr;
@@ -202,6 +203,9 @@ public:
     using ClassRacePair = std::pair<uint8, uint8>;
     std::map<ClassRacePair, uint32> fixedClassRaceCounts;
     uint32 levelProbability[DEFAULT_MAX_LEVEL + 1];
+    bool levelBracketBalancingEnabled;
+    bool levelBracketInitialRandomizationEnabled;
+    std::vector<RandomBotLevelBracket> levelBrackets;
     ClassSpecs classSpecs[MAX_CLASSES];
     GlyphPrioritySpecMap glyphPriorityMap[MAX_CLASSES];
     bool gearProgressionSystemEnabled;
@@ -228,6 +232,7 @@ public:
     bool randomBotShowHelmet;
     bool randomBotShowCloak;
     bool disableRandomLevels;
+    bool naturalLevelingEnabled;
     bool instantRandomize;
     bool gearscorecheck;
     int32 levelCheck;
@@ -243,6 +248,25 @@ public:
     uint32 diffEmpty;
     uint32 minEnchantingBotLevel;
     uint32 randombotStartingLevel;
+    bool retirementEnabled = false;
+    uint32 retirementAllianceBrokerGuid = 0;
+    uint32 retirementAllianceBrokerAccount = 0;
+    uint32 retirementHordeBrokerGuid = 0;
+    uint32 retirementHordeBrokerAccount = 0;
+    uint32 retirementCheckInterval;
+    uint32 retirementMinMaxLevelTime;
+    uint32 retirementMaxPerCycle;
+    uint32 retirementMaxLevelPopulationPercent;
+    uint32 retirementAuctionAttempts;
+    uint32 retirementAuctionDiscountPercentPerAttempt;
+    uint32 retirementGoldSinkMinPercent;
+    uint32 retirementGoldSinkMaxPercent;
+    uint32 retirementInheritanceMinRecipients;
+    uint32 retirementInheritanceMaxRecipients;
+    uint64 retirementMaxInheritancePerBot;
+    bool retirementCreateReplacement;
+    RandomBotCharacterDisposition retirementDisposition;
+    RandomBotUnsellableItemPolicy retirementUnsellableItemPolicy;
     bool randomBotSayWithoutMaster;
     bool randomBotInvitePlayer;
     bool randomBotGroupNearby;

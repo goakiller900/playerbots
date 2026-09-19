@@ -197,13 +197,71 @@ AiPlayerbot.EnableGreet = 1
 AiPlayerbot.RandomBotShowHelmet = 1
 AiPlayerbot.RandomBotShowCloak = 1
 
-# Disable random levels for randombots
-# Every bots started on the specified level and level up by killing mobs.
+# Disable the legacy random level/factory pass for randombots. This option by
+# itself preserves current levels; use NaturalLeveling.Enabled for a one-time
+# starting-level setup followed by normal XP progression.
 AiPlayerbot.DisableRandomLevels = 0
 
-# Set randombots starting level here if "AiPlayerbot.DisableRandomLevels" enabled
+# Starting level used by AiPlayerbot.NaturalLeveling.Enabled
 # Recommended: 5+
 #AiPlayerbot.randombotStartingLevel = 5
+
+# Long-running random-bot population lifecycle (all disabled by default).
+#
+# NaturalLeveling performs one initial setup at randombotStartingLevel and then
+# preserves earned level/XP. It also suppresses periodic gear/level randomization.
+# This is separate from DisableRandomLevels so its legacy behavior is unchanged.
+AiPlayerbot.NaturalLeveling.Enabled = 0
+
+# Optional online login targets. Percentages are selection priorities only:
+# overrepresented online bots are not kicked or de-levelled.
+AiPlayerbot.LevelBracketBalancing.Enabled = 0
+AiPlayerbot.LevelBracketInitialRandomization.Enabled = 0
+AiPlayerbot.LevelBrackets = 1-10,11-20,21-30,31-40,41-50,51-60,61-69,70-70
+AiPlayerbot.LevelBracketBalance = 10,10,10,10,10,10,15,25
+
+# Persistent retirement is opt-in and requires the character DB tables from
+# sql/characters/ai_playerbot_lifecycle.sql. Times are seconds; money is copper.
+# DEVELOPMENT PREVIEW: retirement execution is currently fail-closed, even with
+# Enabled=1. The core transaction patch alone does NOT enable safe liquidation.
+# These reserved settings describe the intended pipeline; see
+# docs/random-bot-lifecycle.md for implemented pieces and remaining safety gates.
+AiPlayerbot.Retirement.Enabled = 0
+
+# Background estate service identities; zero means unprovisioned (fail closed).
+# Admin must create dedicated Alliance/Horde characters through normal core tools,
+# register GUID/account/faction in ai_playerbot_estate_broker, and prevent account
+# login. Never use human or random-bot accounts. See docs/retirement-estate-service.md.
+# Brokers remain offline, excluded from gameplay; names are not hard-coded.
+AiPlayerbot.Retirement.Broker.Alliance.Guid = 0
+AiPlayerbot.Retirement.Broker.Alliance.Account = 0
+AiPlayerbot.Retirement.Broker.Horde.Guid = 0
+AiPlayerbot.Retirement.Broker.Horde.Account = 0
+AiPlayerbot.Retirement.CheckInterval = 300
+AiPlayerbot.Retirement.MinMaxLevelTime = 2592000
+AiPlayerbot.Retirement.MaxPerCycle = 1
+AiPlayerbot.Retirement.MaxLevelPopulationPercent = 35
+AiPlayerbot.Retirement.AuctionAttempts = 3
+AiPlayerbot.Retirement.AuctionDiscountPercentPerAttempt = 10
+AiPlayerbot.Retirement.GoldSinkMinPercent = 40
+AiPlayerbot.Retirement.GoldSinkMaxPercent = 65
+AiPlayerbot.Retirement.InheritanceMinRecipients = 5
+AiPlayerbot.Retirement.InheritanceMaxRecipients = 20
+AiPlayerbot.Retirement.MaxInheritancePerBot = 10000000
+# If all configured accounts are full (common in archive mode), replacement
+# creation adds a recoverable account using RandomBotAccountPrefix.
+AiPlayerbot.Retirement.CreateReplacement = 1
+
+# archive keeps the character and permanently excludes it from random login.
+# delete permanently removes it through the core character-deletion API, but
+# only after all assets/obligations are durably detached to the broker estate.
+# WARNING: delete is destructive. Broker liquidation may continue afterward.
+AiPlayerbot.Retirement.CharacterDisposition = archive
+
+# retain keeps unsellable lots in broker estate custody. destroy explicitly
+# permits their removal. Neither policy permits loss during incomplete intake.
+AiPlayerbot.Retirement.UnsellableItemPolicy = retain
+
 
 # Set XP rate for bots (default: 1)
 # Server XP Rate * AiPlayerbot.XPRate

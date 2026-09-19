@@ -1,0 +1,609 @@
+diff --git a/src/game/Accounts/AccountMgr.cpp b/src/game/Accounts/AccountMgr.cpp
+index 008685db7..8f48d6747 100644
+--- a/src/game/Accounts/AccountMgr.cpp
++++ b/src/game/Accounts/AccountMgr.cpp
+@@ -25,6 +25,10 @@
+ #include "Util/Util.h"
+ #include "Auth/CryptoHash.h"
+ #include "Auth/SRP6.h"
++#ifdef ENABLE_PLAYERBOTS
++#include "playerbot/RandomBotEstateService.h"
++#include "Log/Log.h"
++#endif
+ 
+ extern DatabaseType LoginDatabase;
+ 
+@@ -104,6 +108,13 @@ AccountOpResult AccountMgr::CreateAccount(std::string username, std::string pass
+ 
+ AccountOpResult AccountMgr::DeleteAccount(uint32 accid) const
+ {
++#ifdef ENABLE_PLAYERBOTS
++    if (sRandomBotEstateService.IsServiceAccount(accid))
++    {
++        sLog.outError("Account deletion refused for registered retirement estate service account %u.", accid);
++        return AOR_DB_INTERNAL_ERROR;
++    }
++#endif
+     auto queryResult = LoginDatabase.PQuery("SELECT 1 FROM account WHERE id='%u'", accid);
+     if (!queryResult)
+         return AOR_NAME_NOT_EXIST;                          // account doesn't exist
+diff --git a/src/game/Entities/CharacterHandler.cpp b/src/game/Entities/CharacterHandler.cpp
+index 0d85f3529..3eb18800d 100644
+--- a/src/game/Entities/CharacterHandler.cpp
++++ b/src/game/Entities/CharacterHandler.cpp
+@@ -48,6 +48,7 @@
+ #ifdef ENABLE_PLAYERBOTS
+ #include "playerbot/playerbot.h"
+ #include "playerbot/PlayerbotAIConfig.h"
++#include "playerbot/RandomBotLifecycle.h"
+ #endif
+ 
+ // config option SkipCinematics supported values
+@@ -116,6 +117,14 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+         return;
+ 
+     PlayerbotLoginQueryHolder* lqh = (PlayerbotLoginQueryHolder*)holder;
++    // Completion owns the holder. Reject stale snapshots before allocating a
++    // session; the generic login path repeats the revision check for real sessions.
++    if (!sRandomBotLifecycleMgr.CanLoadCharacter(lqh->GetGuid().GetCounter(), lqh->GetUserRevision()) ||
++        sObjectMgr.GetPlayer(lqh->GetGuid(), false))
++    {
++        delete lqh;
++        return;
++    }
+     uint32 masterAccount = lqh->GetMasterAccountId();
+ 
+     WorldSession* masterSession = masterAccount ? sWorld.FindSession(masterAccount) : NULL;
+@@ -123,10 +132,6 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+     WorldSession* botSession = new WorldSession(botAccountId, NULL, SEC_PLAYER, 2, 0, LOCALE_enUS, "", 0, 0, false);
+     botSession->SetNoAnticheat();
+ 
+-    // has bot already been added?
+-    if (sObjectMgr.GetPlayer(lqh->GetGuid(), false))
+-        return;
+-
+     uint32 guid = lqh->GetGuid().GetRawValue();
+ 
+     botSession->HandlePlayerLogin(lqh); // will delete lqh
+@@ -135,6 +140,7 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+     if (!bot)
+     {
+         sLog.outError("Error logging in bot %d, please try to reset all random bots", guid);
++        delete botSession;
+         return;
+     }
+ 
+@@ -175,6 +181,9 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+ 
+ bool LoginQueryHolder::Initialize()
+ {
++#ifdef ENABLE_PLAYERBOTS
++    SetUserRevision(sRandomBotLifecycleMgr.LoginRevision(m_guid.GetCounter()));
++#endif
+     SetSize(MAX_PLAYER_LOGIN_QUERY);
+ 
+     bool res = true;
+@@ -827,6 +836,18 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder* holder)
+ {
+     ObjectGuid playerGuid = holder->GetGuid();
+ 
++#ifdef ENABLE_PLAYERBOTS
++    if (!sRandomBotLifecycleMgr.CanLoadCharacter(playerGuid.GetCounter(), holder->GetUserRevision()))
++    {
++        delete holder;
++        m_playerLoading = false;
++        WorldPacket data(SMSG_CHARACTER_LOGIN_FAILED, 1);
++        data << uint8(CHAR_LOGIN_FAILED);
++        SendPacket(data);
++        return;
++    }
++#endif
++
+     Player* pCurrChar = new Player(this);
+     SetPlayer(pCurrChar, playerGuid);
+     m_playerLoading = true;
+diff --git a/src/game/Entities/Item.cpp b/src/game/Entities/Item.cpp
+index bd4c41327..89382d1f3 100644
+--- a/src/game/Entities/Item.cpp
++++ b/src/game/Entities/Item.cpp
+@@ -271,6 +271,23 @@ void Item::UpdateDuration(Player* owner, uint32 diff)
+     SetState(ITEM_CHANGED, owner);                          // save new time in database
+ }
+ 
++uint32 Item::GetVendorSellValue(uint32 count) const
++{
++    ItemPrototype const* proto = GetProto();
++    uint32 money = proto->SellPrice * count;
++    for (auto i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
++    {
++        auto const& spell = proto->Spells[i];
++        if (spell.SpellId != 0 && spell.SpellCharges < 0)
++        {
++            auto const multiplier = static_cast<float>(GetSpellCharges(i)) / spell.SpellCharges;
++            money *= multiplier;
++            break;
++        }
++    }
++    return money;
++}
++
+ void Item::SaveToDB()
+ {
+     static const char* UPDATE_ITEM = "UPDATE item_instance SET owner_guid = ?, itemEntry = ?, creatorGuid = ?, giftCreatorGuid = ?, count = ?, duration = ?, charges = ?, flags = ?, enchantments = ?, randomPropertyId = ?, durability = ?, playedTime = ?, text = ? WHERE guid = ?";
+diff --git a/src/game/Entities/Item.h b/src/game/Entities/Item.h
+index ada140e3e..12f0f761c 100644
+--- a/src/game/Entities/Item.h
++++ b/src/game/Entities/Item.h
+@@ -281,6 +281,9 @@ class Item : public Object
+         void RemoveFromWorld() override;
+ 
+         ItemPrototype const* GetProto() const;
++        // Normal vendor arithmetic, shared with background estate liquidation.
++        // Caller validates prototype, count and (for estate accounting) overflow.
++        uint32 GetVendorSellValue(uint32 count) const;
+ 
+         ObjectGuid const& GetOwnerGuid() const { return GetGuidValue(ITEM_FIELD_OWNER); }
+         void SetOwnerGuid(ObjectGuid guid) { SetGuidValue(ITEM_FIELD_OWNER, guid); }
+diff --git a/src/game/Entities/ItemHandler.cpp b/src/game/Entities/ItemHandler.cpp
+index 24927391c..b889c21de 100644
+--- a/src/game/Entities/ItemHandler.cpp
++++ b/src/game/Entities/ItemHandler.cpp
+@@ -567,21 +567,7 @@ void WorldSession::HandleSellItemOpcode(WorldPacket& recv_data)
+         return;
+     }
+ 
+-    uint32 money = pProto->SellPrice * count;
+-
+-    for (auto i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+-    {
+-        auto const& spell = pProto->Spells[i];
+-
+-        // if spell charges for this item are negative, it means that the item should be destroyed once the charges are consumed.
+-        // it also means that the value of this item is relative to how many charges are remaining.
+-        if (spell.SpellId != 0 && spell.SpellCharges < 0)
+-        {
+-            auto const multiplier = static_cast<float>(pItem->GetSpellCharges(i)) / spell.SpellCharges;
+-            money *= multiplier;
+-            break;
+-        }
+-    }
++    uint32 money = pItem->GetVendorSellValue(count);
+ 
+     if (count < pItem->GetCount())              // need split items
+     {
+diff --git a/src/game/Entities/Player.cpp b/src/game/Entities/Player.cpp
+index fcdf0c0cf..bceb7637a 100644
+--- a/src/game/Entities/Player.cpp
++++ b/src/game/Entities/Player.cpp
+@@ -79,6 +79,7 @@
+ #ifdef ENABLE_PLAYERBOTS
+ #include "playerbot/playerbot.h"
+ #include "playerbot/PlayerbotAIConfig.h"
++#include "playerbot/RandomBotEstateService.h"
+ #endif
+ 
+ #include <algorithm>
+@@ -4614,6 +4615,13 @@ TrainerSpellState Player::GetTrainerSpellState(TrainerSpell const* trainer_spell
+  */
+ void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRealmChars, bool deleteFinally)
+ {
++#ifdef ENABLE_PLAYERBOTS
++    if (sRandomBotEstateService.IsServiceCharacter(playerguid.GetCounter()))
++    {
++        sLog.outError("Character deletion refused for registered retirement estate broker %u.", playerguid.GetCounter());
++        return;
++    }
++#endif
+     // for nonexistent account avoid update realm
+     if (accountId == 0)
+         updateRealmChars = false;
+@@ -18530,6 +18538,15 @@ void Player::SaveInventoryAndGoldToDB()
+     SaveGoldToDB();
+ }
+ 
++bool Player::SaveInventoryMoneyAndMailToDB()
++{
++    if (!CharacterDatabase.HasActiveTransaction() || !_SaveInventory())
++        return false;
++    SaveGoldToDB();
++    _SaveMail();
++    return true;
++}
++
+ void Player::SaveGoldToDB() const
+ {
+     static SqlStatementID updateGold ;
+@@ -18703,7 +18720,7 @@ void Player::_SaveGlyphs()
+     }
+ }
+ 
+-void Player::_SaveInventory()
++bool Player::_SaveInventory()
+ {
+     // force items in buyback slots to new state
+     // and remove those that aren't already
+@@ -18738,7 +18755,7 @@ void Player::_SaveInventory()
+ #endif
+ 
+     // if no changes
+-    if (m_itemUpdateQueue.empty()) return;
++    if (m_itemUpdateQueue.empty()) return true;
+ 
+     // do not save if the update queue is corrupt
+     bool error = false;
+@@ -18763,7 +18780,7 @@ void Player::_SaveInventory()
+     {
+         sLog.outError("Player::_SaveInventory - one or more errors occurred save aborted!");
+         ChatHandler(this).SendSysMessage(LANG_ITEM_SAVE_FAILED);
+-        return;
++        return false;
+     }
+ 
+     for (auto item : m_itemUpdateQueue)
+@@ -18773,6 +18790,7 @@ void Player::_SaveInventory()
+         SaveItemToInventory(item);
+     }
+     m_itemUpdateQueue.clear();
++    return true;
+ }
+ 
+ void Player::_SaveMail()
+@@ -25945,4 +25963,4 @@ void Player::SetPet(Unit* pet)
+ {
+     Unit::SetPet(pet);
+     ApplyModByteFlag(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTES_OFFSET_FLAGS, PLAYER_FIELD_BYTE_CONTROLLING_PET, pet != nullptr);
+-}
+\ No newline at end of file
++}
+diff --git a/src/game/Entities/Player.h b/src/game/Entities/Player.h
+index 3dca42005..c65e3cc74 100644
+--- a/src/game/Entities/Player.h
++++ b/src/game/Entities/Player.h
+@@ -1610,6 +1610,11 @@ class Player : public Unit
+ 
+         void SaveToDB();
+         void SaveInventoryAndGoldToDB();                    // fast save function for item/money cheating preventing
++        // Opt-in combined save; requires an existing database transaction.
++        // Includes bank changes through the ordinary inventory update queue.
++        // False means do not commit. Caller must quarantine/reload on failure
++        // because serialization consumes dirty state before commit acknowledgement.
++        bool SaveInventoryMoneyAndMailToDB();
+         void SaveGoldToDB() const;
+         static void SetUInt32ValueInArray(Tokens& tokens, uint16 index, uint32 value);
+         static void Customize(ObjectGuid guid, uint8 gender, uint8 skin, uint8 face, uint8 hairStyle, uint8 hairColor, uint8 facialHair);
+@@ -2711,7 +2716,7 @@ class Player : public Unit
+ 
+         void _SaveActions();
+         void _SaveAuras();
+-        void _SaveInventory();
++        bool _SaveInventory();
+         void _SaveMail();
+         void _SaveQuestStatus();
+         void _SaveDailyQuestStatus();
+diff --git a/src/game/Mails/Mail.cpp b/src/game/Mails/Mail.cpp
+index 84293c01d..8a8334a53 100644
+--- a/src/game/Mails/Mail.cpp
++++ b/src/game/Mails/Mail.cpp
+@@ -246,6 +246,45 @@ void MailDraft::SendReturnToSender(uint32 sender_acc, ObjectGuid sender_guid, Ob
+  * @param checked              The mask used to specify the mail.
+  * @param deliver_delay        The delay after which the mail is delivered in seconds
+  */
++// Queue only: the owning retirement transaction must include its durable receipt,
++// bidder money, auction state and item-owner changes. No mailbox is published here.
++// Item pointers remain owned by the caller until commit/reconciliation.
++bool MailDraft::QueueAuctionDelivery(uint32 mailId, ObjectGuid receiverGuid,
++    MailSender const& sender, time_t deliverTime)
++{
++    if (!CharacterDatabase.HasActiveTransaction() || !mailId || !receiverGuid.IsPlayer() ||
++        sender.GetMailMessageType() != MAIL_AUCTION || m_mailTemplateId || m_COD ||
++        m_items.size() > 1)
++        return false;
++    const time_t expireDelay = m_items.empty() && !m_money ? HOUR : 30 * DAY;
++    AppendDeliveryToDB(mailId, receiverGuid, sender, MAIL_CHECK_MASK_COPIED,
++        deliverTime, deliverTime + expireDelay, !m_items.empty());
++    return true;
++}
++
++void MailDraft::AppendDeliveryToDB(uint32 mailId, ObjectGuid receiverGuid,
++    MailSender const& sender, MailCheckMask checked, time_t deliver_time,
++    time_t expire_time, bool has_items)
++{
++    // Add to DB
++    std::string safe_subject = GetSubject();
++    CharacterDatabase.escape_string(safe_subject);
++
++    std::string safe_body = GetBody();
++    CharacterDatabase.escape_string(safe_body);
++
++    CharacterDatabase.PExecute("INSERT INTO mail (id,messageType,stationery,mailTemplateId,sender,receiver,subject,body,has_items,expire_time,deliver_time,money,cod,checked) "
++                               "VALUES ('%u', '%u', '%u', '%u', '%u', '%u', '%s', '%s', '%u', '" UI64FMTD "','" UI64FMTD "', '%u', '%u', '%u')",
++                               mailId, sender.GetMailMessageType(), sender.GetStationery(), GetMailTemplateId(), sender.GetSenderId(), receiverGuid.GetCounter(), safe_subject.c_str(), safe_body.c_str(), (has_items ? 1 : 0), (uint64)expire_time, (uint64)deliver_time, m_money, m_COD, checked);
++
++    for (MailItemMap::const_iterator mailItemIter = m_items.begin(); mailItemIter != m_items.end(); ++mailItemIter)
++    {
++        Item* item = mailItemIter->second;
++        CharacterDatabase.PExecute("INSERT INTO mail_items (mail_id,item_guid,item_template,receiver) VALUES ('%u', '%u', '%u','%u')",
++                                   mailId, item->GetGUIDLow(), item->GetEntry(), receiverGuid.GetCounter());
++    }
++}
++
+ void MailDraft::SendMailTo(MailReceiver const& receiver, MailSender const& sender, MailCheckMask checked, uint32 deliver_delay)
+ {
+     Player* pReceiver = receiver.GetPlayer();               // can be nullptr
+@@ -283,24 +322,9 @@ void MailDraft::SendMailTo(MailReceiver const& receiver, MailSender const& sende
+ 
+     time_t expire_time = deliver_time + expire_delay;
+ 
+-    // Add to DB
+-    std::string safe_subject = GetSubject();
+-    CharacterDatabase.escape_string(safe_subject);
+-
+-    std::string safe_body = GetBody();
+-    CharacterDatabase.escape_string(safe_body);
+-
+     CharacterDatabase.BeginTransaction();
+-    CharacterDatabase.PExecute("INSERT INTO mail (id,messageType,stationery,mailTemplateId,sender,receiver,subject,body,has_items,expire_time,deliver_time,money,cod,checked) "
+-                               "VALUES ('%u', '%u', '%u', '%u', '%u', '%u', '%s', '%s', '%u', '" UI64FMTD "','" UI64FMTD "', '%u', '%u', '%u')",
+-                               mailId, sender.GetMailMessageType(), sender.GetStationery(), GetMailTemplateId(), sender.GetSenderId(), receiver.GetPlayerGuid().GetCounter(), safe_subject.c_str(), safe_body.c_str(), (has_items ? 1 : 0), (uint64)expire_time, (uint64)deliver_time, m_money, m_COD, checked);
+-
+-    for (MailItemMap::const_iterator mailItemIter = m_items.begin(); mailItemIter != m_items.end(); ++mailItemIter)
+-    {
+-        Item* item = mailItemIter->second;
+-        CharacterDatabase.PExecute("INSERT INTO mail_items (mail_id,item_guid,item_template,receiver) VALUES ('%u', '%u', '%u','%u')",
+-                                   mailId, item->GetGUIDLow(), item->GetEntry(), receiver.GetPlayerGuid().GetCounter());
+-    }
++    AppendDeliveryToDB(mailId, receiver.GetPlayerGuid(), sender, checked,
++        deliver_time, expire_time, has_items);
+     CharacterDatabase.CommitTransaction();
+ 
+     // For online receiver update in game mail status and data
+diff --git a/src/game/Mails/Mail.h b/src/game/Mails/Mail.h
+index af00f3411..61f98600d 100644
+--- a/src/game/Mails/Mail.h
++++ b/src/game/Mails/Mail.h
+@@ -247,7 +247,16 @@ class MailDraft
+     public:                                                 // finishers
+         void SendReturnToSender(uint32 sender_acc, ObjectGuid sender_guid, ObjectGuid receiver_guid);
+         void SendMailTo(MailReceiver const& receiver, MailSender const& sender, MailCheckMask checked = MAIL_CHECK_MASK_NONE, uint32 deliver_delay = 0);
++        // Retirement transaction serialization only; no commit, publication or
++        // item ownership transfer. Caller holds receiver/auction persistence
++        // fences until acknowledgement or receipt-based recovery. The receiver
++        // may be online; its mailbox must not be published before that boundary.
++        bool QueueAuctionDelivery(uint32 mailId, ObjectGuid receiverGuid,
++            MailSender const& sender, time_t deliverTime);
+     private:
++        void AppendDeliveryToDB(uint32 mailId, ObjectGuid receiverGuid,
++            MailSender const& sender, MailCheckMask checked, time_t deliverTime,
++            time_t expireTime, bool hasItems);
+         MailDraft(MailDraft const&);                        // trap decl, no body, mail draft must cloned only explicitly...
+         MailDraft& operator=(MailDraft const&);             // trap decl, no body, ...because items clone is high price operation
+ 
+diff --git a/src/game/World/World.cpp b/src/game/World/World.cpp
+index bfdc99bad..c45e96ce9 100644
+--- a/src/game/World/World.cpp
++++ b/src/game/World/World.cpp
+@@ -87,6 +87,7 @@
+ #include "ahbot/AhBot.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/RandomPlayerbotMgr.h"
++#include "playerbot/RandomBotLifecycle.h"
+ #endif
+ 
+ #include <algorithm>
+@@ -1588,6 +1589,9 @@ void World::SetInitialWorldSettings()
+ 
+ #ifdef ENABLE_PLAYERBOTS
+     sPlayerbotAIConfig.Initialize();
++    // Reserve durable retired/service identities before accepting any sessions,
++    // including realms with random auto-login disabled.
++    sRandomBotLifecycleMgr.Initialize();
+ #ifndef BUILD_AHBOT
+     auctionbot.Init();
+ #endif
+diff --git a/src/shared/Database/Database.cpp b/src/shared/Database/Database.cpp
+index 3f7e81f70..c7bbd3d79 100644
+--- a/src/shared/Database/Database.cpp
++++ b/src/shared/Database/Database.cpp
+@@ -19,6 +19,7 @@
+ #include "DatabaseEnv.h"
+ #include "Config/Config.h"
+ #include "Database/SqlOperations.h"
++#include "Database/AcknowledgedTransaction.h"
+ 
+ #include <ctime>
+ #include <iostream>
+@@ -26,6 +27,62 @@
+ #include <memory>
+ #include <cstdarg>
+ 
++namespace
++{
++    class AcknowledgedTransaction final : public SqlOperation
++    {
++    public:
++        explicit AcknowledgedTransaction(std::function<bool(SqlConnection&)> body)
++            : m_body(std::move(body)) {}
++
++        std::future<bool> GetFuture() { return m_result.get_future(); }
++
++        bool Execute(SqlConnection* connection) override
++        {
++            SqlConnection::Lock lock(connection);
++            const bool committed = RunAcknowledgedTransaction(*connection, m_body);
++            m_result.set_value(committed);
++            return committed;
++        }
++
++    private:
++        std::function<bool(SqlConnection&)> m_body;
++        std::promise<bool> m_result;
++    };
++}
++
++std::future<bool> Database::QueueTransaction(std::function<bool(SqlConnection&)> body)
++{
++    auto operation = std::make_unique<AcknowledgedTransaction>(std::move(body));
++    auto result = operation->GetFuture();
++    MANGOS_ASSERT(!m_currentTransaction.get());
++    if (m_pAsyncConn && m_threadBody)
++        m_threadBody->Delay(operation.release());
++    // An unavailable worker produces a broken promise; callers must fail closed.
++    return result;
++}
++
++std::future<bool> Database::CommitTransactionAcknowledged(
++    std::function<bool(SqlConnection&)> before,
++    std::function<bool(SqlConnection&)> after)
++{
++    if (!m_currentTransaction.get() || !before || !after)
++    {
++        m_currentTransaction.reset();
++        std::promise<bool> rejected;
++        auto result = rejected.get_future();
++        rejected.set_value(false);
++        return result;
++    }
++    // shared_ptr keeps the captured queue copyable for std::function while the
++    // operation owns its lifetime through completion or worker shutdown.
++    std::shared_ptr<SqlTransaction> statements(m_currentTransaction.release());
++    return QueueTransaction([statements, before = std::move(before), after = std::move(after)](SqlConnection& connection)
++    {
++        return before(connection) && statements->ExecuteStatements(&connection) && after(connection);
++    });
++}
++
+ #define MIN_CONNECTION_POOL_SIZE 1
+ #define MAX_CONNECTION_POOL_SIZE 16
+ 
+diff --git a/src/shared/Database/Database.h b/src/shared/Database/Database.h
+index 4ffcb6693..f315e71df 100644
+--- a/src/shared/Database/Database.h
++++ b/src/shared/Database/Database.h
+@@ -29,6 +29,10 @@
+ #include <boost/thread/tss.hpp>
+ #include <atomic>
+ #include <memory>
++#include <functional>
++#include <future>
++
++#define CMANGOS_ASYNC_TRANSACTION_CALLBACK 4
+ 
+ class SqlTransaction;
+ class SqlResultQueue;
+@@ -185,6 +189,21 @@ class Database
+         // for sync transaction execution
+         bool CommitTransactionDirect();
+ 
++        // Runs on the database worker, after earlier queued writes. All reads
++        // and writes must use the supplied connection. Never capture world
++        // objects or call Database::PQuery/PExecute from the callback.
++        // The future is ready only after commit/rollback. A false result must
++        // be reconciled from durable state (a disconnected COMMIT is ambiguous).
++        std::future<bool> QueueTransaction(std::function<bool(SqlConnection&)> body);
++        // Consume a BeginTransaction save queue, with same-connection guards and
++        // journal updates. Callbacks run on the worker: never capture Player*.
++        // A false/exception result requires durable reconciliation, not a repeat
++        // of in-memory mutations. Does not acknowledge merely queueing the save.
++        std::future<bool> CommitTransactionAcknowledged(
++            std::function<bool(SqlConnection&)> before,
++            std::function<bool(SqlConnection&)> after);
++        bool HasActiveTransaction() const { return m_currentTransaction.get() != nullptr; }
++
+         // PREPARED STATEMENT API
+ 
+         // allocate index for prepared statement with SQL request 'fmt'
+diff --git a/src/shared/Database/SqlOperations.cpp b/src/shared/Database/SqlOperations.cpp
+index 942366507..b57d7bd85 100644
+--- a/src/shared/Database/SqlOperations.cpp
++++ b/src/shared/Database/SqlOperations.cpp
+@@ -52,21 +52,23 @@ bool SqlTransaction::Execute(SqlConnection* conn)
+ 
+     conn->BeginTransaction();
+ 
+-    const int nItems = m_queue.size();
+-    for (int i = 0; i < nItems; ++i)
++    if (!ExecuteStatements(conn))
+     {
+-        SqlOperation* pStmt = m_queue[i];
+-
+-        if (!pStmt->Execute(conn))
+-        {
+-            conn->RollbackTransaction();
+-            return false;
+-        }
++        conn->RollbackTransaction();
++        return false;
+     }
+ 
+     return conn->CommitTransaction();
+ }
+ 
++bool SqlTransaction::ExecuteStatements(SqlConnection* conn)
++{
++    for (SqlOperation* statement : m_queue)
++        if (!statement->Execute(conn))
++            return false;
++    return true;
++}
++
+ SqlPreparedRequest::SqlPreparedRequest(int nIndex, SqlStmtParameters* arg) : m_nIndex(nIndex), m_param(arg)
+ {
+ }
+diff --git a/src/shared/Database/SqlOperations.h b/src/shared/Database/SqlOperations.h
+index a249c2864..73920a869 100644
+--- a/src/shared/Database/SqlOperations.h
++++ b/src/shared/Database/SqlOperations.h
+@@ -66,6 +66,10 @@ class SqlTransaction : public SqlOperation
+         void DelayExecute(SqlOperation* sql) { m_queue.push_back(sql); }
+ 
+         bool Execute(SqlConnection* conn) override;
++        // Caller owns the connection lock and BEGIN/COMMIT/ROLLBACK.
++        // Used by acknowledged transactions to include validation and a journal
++        // in the same transaction as existing core prepared save statements.
++        bool ExecuteStatements(SqlConnection* conn);
+ };
+ 
+ class SqlPreparedRequest : public SqlOperation
+@@ -122,7 +126,10 @@ class SqlQueryHolder
+     private:
+         typedef std::pair<const char*, std::unique_ptr<QueryResult>> SqlResultPair;
+         std::vector<SqlResultPair> m_queries;
++        uint64 m_userRevision = 0;
+     public:
++        void SetUserRevision(uint64 revision) { m_userRevision = revision; }
++        uint64 GetUserRevision() const { return m_userRevision; }
+         SqlQueryHolder() {}
+         virtual ~SqlQueryHolder();
+         bool SetQuery(size_t index, const char* sql);
+diff --git a/src/shared/Database/AcknowledgedTransaction.h b/src/shared/Database/AcknowledgedTransaction.h
+new file mode 100644
+--- /dev/null
++++ b/src/shared/Database/AcknowledgedTransaction.h
+@@ -0,0 +1,27 @@
++#ifndef CMANGOS_ACKNOWLEDGED_TRANSACTION_H
++#define CMANGOS_ACKNOWLEDGED_TRANSACTION_H
++
++// Caller owns the connection lock. No database pools or world objects are used.
++// False includes an ambiguous COMMIT: reconcile a durable receipt before retry.
++// Kept independent of core headers for fault-injection tests with a fake connection.
++template<class Connection, class Body>
++bool RunAcknowledgedTransaction(Connection& connection, Body&& body)
++{
++    try
++    {
++        if (!connection.BeginTransaction())
++            return false;
++        if (body(connection) && connection.CommitTransaction())
++            return true;
++        connection.RollbackTransaction();
++    }
++    catch (...)
++    {
++        // Preserve failure even if a disconnected rollback also throws.
++        try { connection.RollbackTransaction(); }
++        catch (...) {}
++    }
++    return false;
++}
++
++#endif
