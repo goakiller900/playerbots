@@ -63,8 +63,9 @@ class SafetyContract(unittest.TestCase):
     def test_broker_guard_boundaries(self):
         manager = (ROOT / "playerbot/RandomBotLifecycle.cpp").read_text()
         self.assertIn("sRandomBotEstateService.IsServiceCharacter(guid)", manager)
-        store = (ROOT / "playerbot/RandomBotLifecycleStore.cpp").read_text()
-        self.assertEqual(store.count("sRandomBotEstateService.IsServiceAccount(account)"), 2)
+        service = (ROOT / "playerbot/RandomBotEstateService.cpp").read_text()
+        self.assertIn("sPlayerbotAIConfig.IsInRandomAccountList(account)", service)
+        self.assertIn("IsServiceCharacter(guid)", service)
         factory = (ROOT / "playerbot/RandomPlayerbotFactory.cpp").read_text()
         self.assertLess(factory.index("sRandomBotEstateService.HasServiceAccounts()"),
                         factory.index("// check if scheduled for delete"))
@@ -72,28 +73,39 @@ class SafetyContract(unittest.TestCase):
         if core.exists():
             account = (core / "src/game/Accounts/AccountMgr.cpp").read_text()
             deletion = account.split("AccountOpResult AccountMgr::DeleteAccount(", 1)[1]
+            self.assertLess(deletion.index("sRandomBotEstateService.Initialize()"),
+                            deletion.index("sRandomBotEstateService.IsServiceAccount"))
             self.assertLess(deletion.index("sRandomBotEstateService.IsServiceAccount"),
                             deletion.index("DELETE FROM"))
+
+    def test_stale_login_fence_is_random_account_scoped(self):
+        source = (ROOT / "playerbot/RandomBotLifecycle.cpp").read_text()
+        method = source.split("bool RandomBotLifecycleMgr::CanLoadCharacter(", 1)[1]
+        method = method.split("bool RandomBotLifecycleMgr::AcquireOfflineLease", 1)[0]
+        account_scope = method.index("IsInRandomAccountList(account)")
+        failure_gate = method.index("if (exclusionsFailed)")
+        self.assertLess(account_scope, failure_gate)
+        self.assertIn("return true;", method[account_scope:failure_gate])
 
     def test_migration_only_creates_optional_tables(self):
         sql = (ROOT / "sql/characters/ai_playerbot_lifecycle.sql").read_text()
         sql = re.sub(r"--[^\n]*", "", sql)
         statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
-        self.assertEqual(len(statements), 6)
+        self.assertEqual(len(statements), 1)
         for statement in statements:
             self.assertTrue(statement.startswith("CREATE TABLE IF NOT EXISTS `ai_playerbot_lifecycle"))
             self.assertIn("ENGINE=InnoDB", statement)
 
     def test_worker_accounting_does_not_use_query_pool(self):
-        for name in ("RandomBotLifecycleStore.cpp", "RandomBotLifecycleAssets.cpp", "RandomBotLifecycleAuctions.cpp",
-                     "RandomBotLifecycleAuctionReturns.cpp", "RandomBotEstateStore.cpp", "RandomBotEstateLiquidation.cpp"):
+        for name in ("RandomBotEstateStore.cpp", "RandomBotEstateLiquidation.cpp",
+                     "RandomBotEstateAuctions.cpp", "RandomBotEstateAuctionBids.cpp",
+                     "RandomBotEstateAuctionSettlement.cpp", "RandomBotEstateAuctionMail.cpp"):
             source = (ROOT / "playerbot" / name).read_text()
             self.assertNotRegex(source, r"CharacterDatabase\.(PQuery|Query|PExecute|Execute)\(")
-            self.assertIn("connection.Query", source)
-            self.assertIn("connection.Execute", source)
-        assets = (ROOT / "playerbot/RandomBotLifecycleAssets.cpp").read_text()
-        self.assertIn("CMANGOS_ASYNC_TRANSACTION_CALLBACK < 2", assets)
-        self.assertIn("CommitTransactionAcknowledged", assets)
+        liquidation = (ROOT / "playerbot/RandomBotEstateLiquidation.cpp").read_text()
+        settlement = (ROOT / "playerbot/RandomBotEstateAuctionSettlement.cpp").read_text()
+        self.assertIn("CommitTransactionAcknowledged", liquidation)
+        self.assertIn("CommitTransactionAcknowledged", settlement)
 
     def test_exported_patch_matches_pinned_reference(self):
         core = ROOT / ".core-reference"

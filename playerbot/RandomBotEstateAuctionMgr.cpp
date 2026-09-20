@@ -158,9 +158,15 @@ void RandomBotEstateAuctionMgr::Initialize()
 {
     if (impl->initialized)
         return;
-    impl->initialized = true;
-    if (!RandomBotLifecycleMgr::ExecutionAllowed() || !sRandomBotEstateService.Ready())
+    if (!RandomBotLifecycleMgr::ExecutionAllowed())
+    {
+        impl->initialized = true;
         return;
+    }
+    sRandomBotEstateService.Initialize();
+    if (!sRandomBotEstateService.Ready())
+        return;
+    impl->initialized = true;
     auto sellers=CharacterDatabase.Query("SELECT auction_id FROM ai_playerbot_estate_auction WHERE status IN (0,1)");
     if(sellers)do{uint32 id=sellers->Fetch()[0].GetUInt32();impl->tracked.insert(id);impl->sellerAuctions.insert(id);}while(sellers->NextRow());
     auto claims=CharacterDatabase.Query("SELECT auction_id FROM ai_playerbot_estate_bid_claim WHERE status=0");
@@ -314,6 +320,7 @@ bool RandomBotEstateAuctionMgr::HandleExpiration(AuctionEntry* auction, time_t n
     r.bid=auction->bid; r.deposit=auction->deposit; r.cut=auction->GetAuctionCut();
     r.expiresAt=auction->expireTime; r.payoutAt=auction->moneyDeliveryTime;
     if (r.kind==ESTATE_AUCTION_WON) r.payoutAt=uint64(now)+HOUR;
+    r.claimWin=r.kind==ESTATE_AUCTION_WON&&impl->claimAuctions.count(r.auctionId);
     r.mailId=sObjectMgr.GenerateMailID();
     Item* item=r.itemGuid?sAuctionMgr.GetAItem(r.itemGuid):nullptr;
     if ((r.kind==ESTATE_AUCTION_EXPIRED||r.kind==ESTATE_AUCTION_WON)&&!item)
@@ -367,6 +374,8 @@ bool RandomBotEstateAuctionMgr::HandleExpiration(AuctionEntry* auction, time_t n
 void RandomBotEstateAuctionMgr::Update()
 {
     Initialize();
+    if (!impl->initialized)
+        return;
     for (auto it=impl->pending.begin(); it!=impl->pending.end();)
     {
         if (it->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
@@ -443,6 +452,8 @@ void RandomBotEstateAuctionMgr::Update()
                 auction->itemGuidLow=0;
                 auction->moneyDeliveryTime=time_t(r.payoutAt);
                 it->mail->PublishQueuedAuctionDelivery(r.mailId,ObjectGuid(HIGHGUID_PLAYER,r.bidder),MailSender(auction),it->deliverTime);
+                if(r.claimWin)
+                    impl->claimAuctions.erase(r.auctionId);
             }
             else
             {
@@ -461,6 +472,8 @@ void RandomBotEstateAuctionMgr::Update()
         }
         if(!committed)
             sLog.outError("Retirement estate auction %u settlement failed durable reconciliation; it remains retryable.",r.auctionId);
+        else
+            sLog.outDetail("Retirement estate auction %u settlement stage %u committed.",r.auctionId,r.kind);
         impl->resolving.erase(r.auctionId);
         it=impl->settlements.erase(it);
     }
@@ -507,6 +520,9 @@ void RandomBotEstateAuctionMgr::Update()
         if(!committed&&it->phase==Impl::COMMITTING){it->phase=Impl::CONFIRMING;it->result=RandomBotEstateStore::ConfirmAuctionListing(it->request);++it;continue;}
         if(committed&&!PublishListing(it->request.auctionId))
             sLog.outError("Retirement estate auction %u committed but could not publish; startup recovery will load it.",it->request.auctionId);
+        else if(committed)
+            sLog.outDetail("Retirement estate " UI64FMTD " listed auction %u (attempt %u).",
+                it->request.estateId,it->request.auctionId,it->request.attempt);
         impl->busyLots.erase(it->request.lotId);it=impl->listingWork.erase(it);
     }
     for(auto it=impl->liquidationWork.begin();it!=impl->liquidationWork.end();)
@@ -515,6 +531,8 @@ void RandomBotEstateAuctionMgr::Update()
         bool committed=false;try{committed=it->result.get();}catch(...){committed=false;}
         if(!committed&&it->phase==Impl::COMMITTING){it->phase=Impl::CONFIRMING;it->result=RandomBotEstateStore::ConfirmLotLiquidation(it->request);++it;continue;}
         if(!committed)sLog.outError("Retirement estate lot " UI64FMTD " liquidation held after failed reconciliation.",it->request.lotId);
+        else sLog.outDetail("Retirement estate " UI64FMTD " lot " UI64FMTD " %s for " UI64FMTD " copper.",
+            it->request.estateId,it->request.lotId,it->request.destroy?"destroyed":"vendored",it->request.proceeds);
         impl->busyLots.erase(it->request.lotId);it=impl->liquidationWork.erase(it);
     }
     for(auto it=impl->claimMailWork.begin();it!=impl->claimMailWork.end();)
@@ -604,7 +622,7 @@ void RandomBotEstateAuctionMgr::Update()
             r.deposit=AuctionHouseMgr::GetAuctionDeposit(houseEntry,sPlayerbotAIConfig.retirementAuctionDuration,proto,count);
             if(f[11].GetUInt64()<r.deposit)
             {CharacterDatabase.PExecute("UPDATE ai_playerbot_estate_lot SET status=3,updated_at=UNIX_TIMESTAMP() WHERE lot_id='" UI64FMTD "' AND status IN (0,2)",lotId);continue;}
-            total=std::min<uint64>(total,uint64(UINT32_MAX)-r.deposit);
+            total=std::min<uint64>(total,uint64(MAX_MONEY_AMOUNT));
             r.randomPropertyId=f[10].GetInt32();r.attempt=nextAttempt;r.buyout=std::max(1u,uint32(total));r.startBid=std::max(1u,uint32(total*80/100));
             r.expiresAt=uint64(now)+sPlayerbotAIConfig.retirementAuctionDuration;work.result=RandomBotEstateStore::CreateAuctionListing(r);
             impl->busyLots.insert(lotId);impl->listingWork.emplace_back(std::move(work));continue;

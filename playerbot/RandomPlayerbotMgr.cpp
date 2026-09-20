@@ -650,9 +650,14 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
 #endif
 
-    // Poll acknowledged estate transactions even when random auto-login is
-    // disabled; a real player's tracked AH bid must always be released.
+    // Recovery of a persisted intake/estate is independent of whether random
+    // bot auto-login is currently enabled.  Only admission of new retirements
+    // is controlled by Retirement.Enabled inside the lifecycle manager.
+    sRandomBotLifecycleMgr.Initialize();
+    // Initialize broker identity/exclusions before the AH coordinator loads
+    // tracked auctions; the coordinator intentionally fails closed otherwise.
     sRandomBotEstateAuctionMgr.Update();
+    sRandomBotLifecycleMgr.Update(0);
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
 
@@ -673,11 +678,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     if (!playersLevel)
         playersLevel = sPlayerbotAIConfig.syncLevelNoPlayer;
 
-    // Load archive/retirement exclusions before either login selector builds a candidate pool.
-    sRandomBotLifecycleMgr.Initialize();
-
     ScaleBotActivity();
-    sRandomBotLifecycleMgr.Update(0);
     if (sPlayerbotAIConfig.asyncBotLogin)
     {
         auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "AsyncBotLogin");

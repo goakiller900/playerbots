@@ -266,8 +266,8 @@ bool RandomBotLifecycleMath::CanTransition(RandomBotLifecycleStatus from, Random
     switch (from)
     {
         case RandomBotLifecycleStatus::ACTIVE:
-            return to == RandomBotLifecycleStatus::MAX_LEVEL;
-        case RandomBotLifecycleStatus::MAX_LEVEL:
+            return to == RandomBotLifecycleStatus::AT_MAX_LEVEL;
+        case RandomBotLifecycleStatus::AT_MAX_LEVEL:
             return to == RandomBotLifecycleStatus::ACTIVE || to == RandomBotLifecycleStatus::RETIREMENT_PENDING;
         case RandomBotLifecycleStatus::RETIREMENT_PENDING:
             return to == RandomBotLifecycleStatus::LIQUIDATING ||

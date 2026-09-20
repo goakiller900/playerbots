@@ -68,7 +68,7 @@ bool RunRandomBotLifecycleMathTests(std::string& error)
             "recipient cap was exceeded", error))
         return false;
 
-    if (!Require(RandomBotLifecycleMath::CanTransition(RandomBotLifecycleStatus::MAX_LEVEL,
+    if (!Require(RandomBotLifecycleMath::CanTransition(RandomBotLifecycleStatus::AT_MAX_LEVEL,
             RandomBotLifecycleStatus::RETIREMENT_PENDING), "valid lifecycle transition was rejected", error) ||
         !Require(!RandomBotLifecycleMath::CanTransition(RandomBotLifecycleStatus::ACTIVE,
             RandomBotLifecycleStatus::DELETED), "destructive lifecycle transition was accepted", error) ||

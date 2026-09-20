@@ -221,7 +221,8 @@ AiPlayerbot.LevelBrackets = 1-10,11-20,21-30,31-40,41-50,51-60,61-69,70-70
 AiPlayerbot.LevelBracketBalance = 10,10,10,10,10,10,15,25
 
 # Persistent retirement is opt-in and requires the character DB tables from
-# sql/characters/ai_playerbot_lifecycle.sql. Times are seconds; money is copper.
+# sql/characters/ai_playerbot_lifecycle.sql and ai_playerbot_estate.sql.
+# Times are seconds; money is copper.
 # DEVELOPMENT PREVIEW: retirement execution is currently fail-closed, even with
 # Enabled=1. The core transaction patch alone does NOT enable safe liquidation.
 # These reserved settings describe the intended pipeline; see
@@ -250,6 +251,7 @@ AiPlayerbot.Retirement.Auction.Enabled = 1
 AiPlayerbot.Retirement.Auction.MaxAttempts = 5
 AiPlayerbot.Retirement.Auction.RepostDelay = 3600
 AiPlayerbot.Retirement.Auction.DiscountPerAttempt = 10
+# Normal client AH duration in seconds: 43200, 86400, or 172800 only.
 AiPlayerbot.Retirement.Auction.Duration = 43200
 AiPlayerbot.Retirement.BatchSize = 10
 AiPlayerbot.Retirement.CheckInterval = 300

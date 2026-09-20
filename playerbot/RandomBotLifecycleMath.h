@@ -16,7 +16,7 @@ struct RandomBotLevelBracket
 enum class RandomBotLifecycleStatus : std::uint8_t
 {
     ACTIVE = 0,
-    MAX_LEVEL = 1,
+    AT_MAX_LEVEL = 1,
     RETIREMENT_PENDING = 2,
     LIQUIDATING = 3,
     WAITING_AUCTIONS = 4,
@@ -32,7 +32,7 @@ enum class RandomBotLifecycleStatus : std::uint8_t
 enum class RandomBotCharacterDisposition : std::uint8_t
 {
     ARCHIVE = 0,
-    DELETE = 1
+    DELETE_CHARACTER = 1
 };
 
 enum class RandomBotUnsellableItemPolicy : std::uint8_t

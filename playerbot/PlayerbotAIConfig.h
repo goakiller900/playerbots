@@ -4,7 +4,7 @@
 #include "Talentspec.h"
 #include "Globals/SharedDefines.h"
 #include "SystemConfig.h"
-#include "RandomBotLifecycle.h"
+#include "RandomBotLifecycleMath.h"
 
 class Player;
 class PlayerbotMgr;

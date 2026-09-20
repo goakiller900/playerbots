@@ -9,8 +9,6 @@
 #include <unordered_map>
 #include <vector>
 #include <future>
-#include "RandomBotLifecycleStore.h"
-
 class Player;
 
 #include "RandomBotLifecycleMath.h"
@@ -34,7 +32,7 @@ public:
     bool IsLoginEligible(uint32 guid) const;
     bool IsRetiringOrRetired(uint32 guid) const;
     uint64 LoginRevision(uint32 guid) const;
-    bool CanLoadCharacter(uint32 guid, uint64 revision) const;
+    bool CanLoadCharacter(uint32 guid, uint32 account, uint64 revision) const;
     bool AcquireOfflineLease(uint32 guid);
     void ReleaseOfflineLease(uint32 guid);
 
@@ -54,6 +52,11 @@ private:
     bool exclusionsAvailable = false;
     bool exclusionsFailed = false;
     bool workPending = false;
+    bool workReloadLoginPool = false;
+    uint64 workCompletedEstateId = 0;
+    std::string workSuccessMessage;
+    uint32 workLeaseGuid = 0;
+    uint32 workLifecycleGuid = 0;
     std::future<bool> workResult;
     time_t nextWorkAt = 0;
     time_t nextEligibilityAt = 0;

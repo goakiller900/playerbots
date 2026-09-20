@@ -4,6 +4,7 @@
 #include "PlayerbotAIConfig.h"
 #include "RandomPlayerbotMgr.h"
 #include "RandomBotLifecycle.h"
+#include <sstream>
 
 using namespace ai;
 
@@ -433,6 +434,16 @@ T GetFuture(Method&& method, std::future<T>& fut, bool restart, Args&&... args) 
 
 void PlayerBotLoginMgr::Update(RealPlayers& realPlayers)
 {
+    if (reloadRequested && (!futureQueue.valid() ||
+        futureQueue.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
+    {
+        if (futureQueue.valid())
+            futureQueue.get();
+        botPool.clear();
+        onlineBots.clear();
+        reloadRequested = false;
+    }
+
     UpdateOnlineBots();
 
     if (botPool.empty())
@@ -487,6 +498,8 @@ BotPool PlayerBotLoginMgr::LoadBotsFromDb()
             continue;
 
         uint32 guid = fields[1].GetUInt32();
+        if (!sRandomBotLifecycleMgr.IsLoginEligible(guid))
+            continue;
         uint32 race = fields[2].GetUInt8();
         uint32 cls = fields[3].GetUInt8();
         uint32 level = fields[4].GetUInt32();
@@ -589,8 +602,10 @@ LoginCriteria PlayerBotLoginMgr::GetLoginCriteria(const uint8 attempt)
         std::vector<std::string> expanded;
         for (const std::string& criterion : configCriteria)
         {
-            std::vector<std::string> parts = split(criterion, ',');
-            expanded.insert(expanded.end(), parts.begin(), parts.end());
+            std::stringstream values(criterion);
+            std::string part;
+            while (std::getline(values, part, ','))
+                expanded.push_back(part);
         }
         configCriteria.swap(expanded);
     }

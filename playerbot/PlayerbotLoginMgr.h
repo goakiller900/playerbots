@@ -145,6 +145,7 @@ namespace ai
 	{
 	public:
 		void Update(RealPlayers& realPlayers);
+        void RequestBotPoolReload() { reloadRequested = true; }
 		void ToggleDebug() { debug = !debug; }
 	private:
 		static BotPool LoadBotsFromDb();
@@ -171,6 +172,7 @@ namespace ai
 		std::future<BotPool> futurePool;
 
 		bool debug = false;
+        bool reloadRequested = false;
 		BotInfos onlineBots;
 		BotPool botPool;
 	};

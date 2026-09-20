@@ -25,6 +25,8 @@ void PostQueries(RandomBotEstateAuctionResolution const& r)
     {
         q.push_back({"SELECT COUNT(*) FROM auction",{{1}}});
         q.push_back({"SELECT COUNT(*) FROM item_instance",{{1}}});
+        if(r.claimWin)
+            q.push_back({"SELECT COUNT(*) FROM ai_playerbot_estate_bid_claim",{{1}}});
     }
     else
     {
@@ -36,10 +38,12 @@ void PostQueries(RandomBotEstateAuctionResolution const& r)
 void Setup(RandomBotEstateAuctionResolution const& r)
 {
     CharacterDatabase.connection={}; auto& q=CharacterDatabase.connection.queries;
-    q.push_back({"information_schema.tables",{{5}}});
-    q.push_back({"SELECT broker_guid,item_guid",{{r.owner},{r.itemGuid},{r.itemEntry},{r.itemCount},
+    q.push_back({"information_schema.tables",{{6}}});
+    q.push_back({"SELECT broker_guid,item_guid",{{r.owner},{r.kind==ESTATE_AUCTION_PAYOUT?900u:r.itemGuid},{r.itemEntry},{r.itemCount},
         {r.kind==ESTATE_AUCTION_PAYOUT?1u:0u},{r.bidder},{r.bid},{r.deposit},
         {r.kind==ESTATE_AUCTION_WON?0u:r.cut},{r.expiresAt},{r.kind==ESTATE_AUCTION_WON?0u:r.payoutAt},{0}}});
+    if(r.claimWin)
+        q.push_back({"SELECT COUNT(*) FROM ai_playerbot_estate_bid_claim",{{1}}});
     q.push_back({"SELECT itemowner,itemguid",{{r.owner},{r.itemGuid},{r.itemEntry},{r.itemCount},
         {r.bidder},{r.bid},{r.deposit},{r.expiresAt},{r.kind==ESTATE_AUCTION_WON?0u:r.payoutAt}}});
     PostQueries(r);
@@ -65,4 +69,19 @@ int main()
         CharacterDatabase.connection={}; PostQueries(r);
         assert(RandomBotEstateStore::ConfirmAuctionResolution(r).get());
     }
+
+    auto combined=Request(ESTATE_AUCTION_WON);
+    combined.claimWin=true;
+    for(unsigned fail=0;fail<=3;++fail)
+    {
+        Setup(combined); CharacterDatabase.connection.failExecute=fail;
+        assert(RandomBotEstateStore::CommitAuctionResolution(combined).get()==(fail==0));
+        assert(!CharacterDatabase.connection.mismatch);
+        assert(CharacterDatabase.connection.durable.size()==(fail?0u:3u));
+    }
+    Setup(combined); CharacterDatabase.connection.loseCommitAck=true;
+    assert(!RandomBotEstateStore::CommitAuctionResolution(combined).get());
+    assert(CharacterDatabase.connection.durable.size()==3);
+    CharacterDatabase.connection={}; PostQueries(combined);
+    assert(RandomBotEstateStore::ConfirmAuctionResolution(combined).get());
 }

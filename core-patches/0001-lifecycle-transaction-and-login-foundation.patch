@@ -1,5 +1,5 @@
 diff --git a/src/game/Accounts/AccountMgr.cpp b/src/game/Accounts/AccountMgr.cpp
-index 008685db7..8f48d6747 100644
+index 008685db7..cdc7e89f2 100644
 --- a/src/game/Accounts/AccountMgr.cpp
 +++ b/src/game/Accounts/AccountMgr.cpp
 @@ -25,6 +25,10 @@
@@ -13,11 +13,12 @@ index 008685db7..8f48d6747 100644
  
  extern DatabaseType LoginDatabase;
  
-@@ -104,6 +108,13 @@ AccountOpResult AccountMgr::CreateAccount(std::string username, std::string pass
+@@ -104,6 +108,14 @@ AccountOpResult AccountMgr::CreateAccount(std::string username, std::string pass
  
  AccountOpResult AccountMgr::DeleteAccount(uint32 accid) const
  {
 +#ifdef ENABLE_PLAYERBOTS
++    sRandomBotEstateService.Initialize();
 +    if (sRandomBotEstateService.IsServiceAccount(accid))
 +    {
 +        sLog.outError("Account deletion refused for registered retirement estate service account %u.", accid);
@@ -56,7 +57,7 @@ index 843ded9f7..63793e789 100644
  
      if (auction->UpdateBid(price, pl))
 diff --git a/src/game/AuctionHouse/AuctionHouseMgr.cpp b/src/game/AuctionHouse/AuctionHouseMgr.cpp
-index 6555ef6e7..8a77be5c3 100644
+index 6555ef6e7..1207c8a40 100644
 --- a/src/game/AuctionHouse/AuctionHouseMgr.cpp
 +++ b/src/game/AuctionHouse/AuctionHouseMgr.cpp
 @@ -33,6 +33,9 @@
@@ -84,7 +85,7 @@ index 6555ef6e7..8a77be5c3 100644
  
      deposit = deposit * entry->depositPercent * 3.0f / 100.0f;
  
-@@ -473,6 +482,83 @@ bool AuctionHouseMgr::RemoveAItem(uint32 id)
+@@ -473,6 +482,97 @@ bool AuctionHouseMgr::RemoveAItem(uint32 id)
      return true;
  }
  
@@ -100,6 +101,37 @@ index 6555ef6e7..8a77be5c3 100644
 +{
 +    if (!auctionId)
 +        return false;
++    auto auctionResult = CharacterDatabase.PQuery(
++        "SELECT itemguid,houseid,itemowner,buyoutprice,time,moneyTime,buyguid,lastbid,startbid,deposit,"
++        "item_template,item_count,item_randompropertyid FROM auction WHERE id=%u", auctionId);
++    if (!auctionResult)
++        return false;
++    Field* auctionFields = auctionResult->Fetch();
++    const uint32 dbItemGuid = auctionFields[0].GetUInt32();
++    const uint32 owner = auctionFields[2].GetUInt32();
++    AuctionHouseEntry const* house = sAuctionHouseStore.LookupEntry(auctionFields[1].GetUInt32());
++    std::string ownerName;
++    std::wstring wideOwnerName;
++    if (!owner || !house || !sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, owner), ownerName) ||
++        !Utf8toWStr(ownerName, wideOwnerName))
++        return false;
++    if (AuctionEntry* existing = FindAuction(auctionId))
++    {
++        if (existing->itemGuidLow != dbItemGuid || existing->itemTemplate != auctionFields[10].GetUInt32() ||
++            existing->itemCount != auctionFields[11].GetUInt32() || existing->auctionHouseEntry != house)
++            return false;
++        existing->owner = owner;
++        existing->ownerName = wideOwnerName;
++        existing->buyout = auctionFields[3].GetUInt32(); existing->expireTime = time_t(auctionFields[4].GetUInt64());
++        existing->moneyDeliveryTime = time_t(auctionFields[5].GetUInt64()); existing->bidder = auctionFields[6].GetUInt32();
++        existing->bid = auctionFields[7].GetUInt32(); existing->startbid = auctionFields[8].GetUInt32();
++        existing->deposit = auctionFields[9].GetUInt32();
++        return true;
++    }
++    // Sold auctions have no item to reconstruct and are loaded by the normal
++    // startup path. This helper may only add a new visible listing.
++    if (!dbItemGuid || auctionFields[5].GetUInt64())
++        return false;
 +    // Item fields must remain first and in Item::LoadFromDB order.
 +    auto result = CharacterDatabase.PQuery(
 +        "SELECT i.itemEntry,i.creatorGuid,i.giftCreatorGuid,i.count,i.duration,i.charges,i.flags,i.enchantments,"
@@ -110,26 +142,9 @@ index 6555ef6e7..8a77be5c3 100644
 +        return false;
 +    Field* f = result->Fetch();
 +    const uint32 itemGuid = f[12].GetUInt32();
-+    const uint32 owner = f[14].GetUInt32();
-+    AuctionHouseEntry const* house = sAuctionHouseStore.LookupEntry(f[13].GetUInt32());
 +    ItemPrototype const* proto = ObjectMgr::GetItemPrototype(f[0].GetUInt32());
-+    std::string ownerName;
-+    std::wstring wideOwnerName;
-+    if (!owner || !sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, owner), ownerName) ||
-+        !Utf8toWStr(ownerName, wideOwnerName))
++    if (itemGuid != dbItemGuid || owner != f[14].GetUInt32() || house != sAuctionHouseStore.LookupEntry(f[13].GetUInt32()))
 +        return false;
-+    if (AuctionEntry* existing = FindAuction(auctionId))
-+    {
-+        if (existing->itemGuidLow != itemGuid || existing->itemTemplate != f[22].GetUInt32() ||
-+            existing->itemCount != f[23].GetUInt32() || existing->auctionHouseEntry != house)
-+            return false;
-+        existing->owner = owner;
-+        existing->ownerName = wideOwnerName;
-+        existing->buyout = f[15].GetUInt32(); existing->expireTime = time_t(f[16].GetUInt64());
-+        existing->moneyDeliveryTime = time_t(f[17].GetUInt64()); existing->bidder = f[18].GetUInt32();
-+        existing->bid = f[19].GetUInt32(); existing->startbid = f[20].GetUInt32(); existing->deposit = f[21].GetUInt32();
-+        return true;
-+    }
 +    if (!itemGuid || !house || !proto || GetAItem(itemGuid))
 +        return false;
 +    Item* item = NewItemOrBag(proto);
@@ -168,7 +183,7 @@ index 6555ef6e7..8a77be5c3 100644
  void AuctionHouseMgr::Update()
  {
      for (auto& mAuction : mAuctions)
-@@ -563,6 +649,15 @@ void AuctionHouseObject::Update()
+@@ -563,6 +663,15 @@ void AuctionHouseObject::Update()
      ///- Handle expired auctions
      for (AuctionEntryMap::iterator itr = AuctionsMap.begin(); itr != AuctionsMap.end();)
      {
@@ -185,10 +200,18 @@ index 6555ef6e7..8a77be5c3 100644
          {
              if (curTime > itr->second->moneyDeliveryTime)
 diff --git a/src/game/AuctionHouse/AuctionHouseMgr.h b/src/game/AuctionHouse/AuctionHouseMgr.h
-index b8192d815..bfd8f580d 100644
+index b8192d815..e1d5f0978 100644
 --- a/src/game/AuctionHouse/AuctionHouseMgr.h
 +++ b/src/game/AuctionHouse/AuctionHouseMgr.h
-@@ -181,6 +181,8 @@ class AuctionHouseMgr
+@@ -26,6 +26,7 @@ class Item;
+ class Player;
+ class Unit;
+ class WorldPacket;
++struct ItemPrototype;
+ 
+ #define MIN_AUCTION_TIME (12*HOUR)
+ #define MAX_AUCTION_SORT 12
+@@ -181,6 +182,8 @@ class AuctionHouseMgr
          static void SendAuctionSuccessfulMail(AuctionEntry* auction);
          void SendAuctionExpiredMail(AuctionEntry* auction);
          static uint32 GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem);
@@ -197,7 +220,7 @@ index b8192d815..bfd8f580d 100644
  
          static uint32 GetAuctionHouseTeam(AuctionHouseEntry const* house);
          static AuctionHouseEntry const* GetAuctionHouseEntry(Unit* unit);
-@@ -192,6 +194,8 @@ class AuctionHouseMgr
+@@ -192,6 +195,8 @@ class AuctionHouseMgr
  
          void AddAItem(Item* it);
          bool RemoveAItem(uint32 id);
@@ -207,7 +230,7 @@ index b8192d815..bfd8f580d 100644
          void Update();
  
 diff --git a/src/game/Entities/CharacterHandler.cpp b/src/game/Entities/CharacterHandler.cpp
-index 0d85f3529..3eb18800d 100644
+index 0d85f3529..47698be37 100644
 --- a/src/game/Entities/CharacterHandler.cpp
 +++ b/src/game/Entities/CharacterHandler.cpp
 @@ -48,6 +48,7 @@
@@ -218,13 +241,14 @@ index 0d85f3529..3eb18800d 100644
  #endif
  
  // config option SkipCinematics supported values
-@@ -116,6 +117,14 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+@@ -116,6 +117,15 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
          return;
  
      PlayerbotLoginQueryHolder* lqh = (PlayerbotLoginQueryHolder*)holder;
 +    // Completion owns the holder. Reject stale snapshots before allocating a
 +    // session; the generic login path repeats the revision check for real sessions.
-+    if (!sRandomBotLifecycleMgr.CanLoadCharacter(lqh->GetGuid().GetCounter(), lqh->GetUserRevision()) ||
++    if (!sRandomBotLifecycleMgr.CanLoadCharacter(lqh->GetGuid().GetCounter(), lqh->GetAccountId(),
++            lqh->GetUserRevision()) ||
 +        sObjectMgr.GetPlayer(lqh->GetGuid(), false))
 +    {
 +        delete lqh;
@@ -233,7 +257,7 @@ index 0d85f3529..3eb18800d 100644
      uint32 masterAccount = lqh->GetMasterAccountId();
  
      WorldSession* masterSession = masterAccount ? sWorld.FindSession(masterAccount) : NULL;
-@@ -123,10 +132,6 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+@@ -123,10 +133,6 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
      WorldSession* botSession = new WorldSession(botAccountId, NULL, SEC_PLAYER, 2, 0, LOCALE_enUS, "", 0, 0, false);
      botSession->SetNoAnticheat();
  
@@ -244,7 +268,7 @@ index 0d85f3529..3eb18800d 100644
      uint32 guid = lqh->GetGuid().GetRawValue();
  
      botSession->HandlePlayerLogin(lqh); // will delete lqh
-@@ -135,6 +140,7 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+@@ -135,6 +141,7 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
      if (!bot)
      {
          sLog.outError("Error logging in bot %d, please try to reset all random bots", guid);
@@ -252,7 +276,7 @@ index 0d85f3529..3eb18800d 100644
          return;
      }
  
-@@ -175,6 +181,9 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
+@@ -175,6 +182,9 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* dummy, SqlQueryH
  
  bool LoginQueryHolder::Initialize()
  {
@@ -262,12 +286,13 @@ index 0d85f3529..3eb18800d 100644
      SetSize(MAX_PLAYER_LOGIN_QUERY);
  
      bool res = true;
-@@ -827,6 +836,18 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder* holder)
+@@ -827,6 +837,19 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder* holder)
  {
      ObjectGuid playerGuid = holder->GetGuid();
  
 +#ifdef ENABLE_PLAYERBOTS
-+    if (!sRandomBotLifecycleMgr.CanLoadCharacter(playerGuid.GetCounter(), holder->GetUserRevision()))
++    if (!sRandomBotLifecycleMgr.CanLoadCharacter(playerGuid.GetCounter(), GetAccountId(),
++            holder->GetUserRevision()))
 +    {
 +        delete holder;
 +        m_playerLoading = false;
@@ -351,7 +376,7 @@ index 24927391c..b889c21de 100644
      if (count < pItem->GetCount())              // need split items
      {
 diff --git a/src/game/Entities/Player.cpp b/src/game/Entities/Player.cpp
-index fcdf0c0cf..9ef1ef03d 100644
+index fcdf0c0cf..41d855090 100644
 --- a/src/game/Entities/Player.cpp
 +++ b/src/game/Entities/Player.cpp
 @@ -79,6 +79,7 @@
@@ -362,11 +387,12 @@ index fcdf0c0cf..9ef1ef03d 100644
  #endif
  
  #include <algorithm>
-@@ -4614,6 +4615,13 @@ TrainerSpellState Player::GetTrainerSpellState(TrainerSpell const* trainer_spell
+@@ -4614,6 +4615,14 @@ TrainerSpellState Player::GetTrainerSpellState(TrainerSpell const* trainer_spell
   */
  void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRealmChars, bool deleteFinally)
  {
 +#ifdef ENABLE_PLAYERBOTS
++    sRandomBotEstateService.Initialize();
 +    if (sRandomBotEstateService.IsServiceCharacter(playerguid.GetCounter()))
 +    {
 +        sLog.outError("Character deletion refused for registered retirement estate broker %u.", playerguid.GetCounter());
@@ -376,7 +402,7 @@ index fcdf0c0cf..9ef1ef03d 100644
      // for nonexistent account avoid update realm
      if (accountId == 0)
          updateRealmChars = false;
-@@ -18307,6 +18315,10 @@ bool Player::_LoadHomeBind(std::unique_ptr<QueryResult> queryResult)
+@@ -18307,6 +18316,10 @@ bool Player::_LoadHomeBind(std::unique_ptr<QueryResult> queryResult)
  
  void Player::SaveToDB()
  {
@@ -387,58 +413,7 @@ index fcdf0c0cf..9ef1ef03d 100644
      // we should assure this: ASSERT((m_nextSave != sWorld.getConfig(CONFIG_UINT32_INTERVAL_SAVE)));
      // delay auto save at any saves (manual, in code, or autosave)
      m_nextSave = sWorld.getConfig(CONFIG_UINT32_INTERVAL_SAVE);
-@@ -18530,6 +18542,15 @@ void Player::SaveInventoryAndGoldToDB()
-     SaveGoldToDB();
- }
- 
-+bool Player::SaveInventoryMoneyAndMailToDB()
-+{
-+    if (!CharacterDatabase.HasActiveTransaction() || !_SaveInventory())
-+        return false;
-+    SaveGoldToDB();
-+    _SaveMail();
-+    return true;
-+}
-+
- void Player::SaveGoldToDB() const
- {
-     static SqlStatementID updateGold ;
-@@ -18703,7 +18724,7 @@ void Player::_SaveGlyphs()
-     }
- }
- 
--void Player::_SaveInventory()
-+bool Player::_SaveInventory()
- {
-     // force items in buyback slots to new state
-     // and remove those that aren't already
-@@ -18738,7 +18759,7 @@ void Player::_SaveInventory()
- #endif
- 
-     // if no changes
--    if (m_itemUpdateQueue.empty()) return;
-+    if (m_itemUpdateQueue.empty()) return true;
- 
-     // do not save if the update queue is corrupt
-     bool error = false;
-@@ -18763,7 +18784,7 @@ void Player::_SaveInventory()
-     {
-         sLog.outError("Player::_SaveInventory - one or more errors occurred save aborted!");
-         ChatHandler(this).SendSysMessage(LANG_ITEM_SAVE_FAILED);
--        return;
-+        return false;
-     }
- 
-     for (auto item : m_itemUpdateQueue)
-@@ -18773,6 +18794,7 @@ void Player::_SaveInventory()
-         SaveItemToInventory(item);
-     }
-     m_itemUpdateQueue.clear();
-+    return true;
- }
- 
- void Player::_SaveMail()
-@@ -25945,4 +25967,4 @@ void Player::SetPet(Unit* pet)
+@@ -25945,4 +25958,4 @@ void Player::SetPet(Unit* pet)
  {
      Unit::SetPet(pet);
      ApplyModByteFlag(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTES_OFFSET_FLAGS, PLAYER_FIELD_BYTE_CONTROLLING_PET, pet != nullptr);
@@ -446,34 +421,19 @@ index fcdf0c0cf..9ef1ef03d 100644
 \ No newline at end of file
 +}
 diff --git a/src/game/Entities/Player.h b/src/game/Entities/Player.h
-index 3dca42005..cc4440781 100644
+index 3dca42005..e15ce68d2 100644
 --- a/src/game/Entities/Player.h
 +++ b/src/game/Entities/Player.h
-@@ -1609,7 +1609,14 @@ class Player : public Unit
+@@ -1609,6 +1609,8 @@ class Player : public Unit
          /*********************************************************/
  
          void SaveToDB();
 +        bool IsEstateAuctionPending() const { return m_estateAuctionPending; }
 +        void SetEstateAuctionPending(bool pending) { m_estateAuctionPending = pending; }
          void SaveInventoryAndGoldToDB();                    // fast save function for item/money cheating preventing
-+        // Opt-in combined save; requires an existing database transaction.
-+        // Includes bank changes through the ordinary inventory update queue.
-+        // False means do not commit. Caller must quarantine/reload on failure
-+        // because serialization consumes dirty state before commit acknowledgement.
-+        bool SaveInventoryMoneyAndMailToDB();
          void SaveGoldToDB() const;
          static void SetUInt32ValueInArray(Tokens& tokens, uint16 index, uint32 value);
-         static void Customize(ObjectGuid guid, uint8 gender, uint8 skin, uint8 face, uint8 hairStyle, uint8 hairColor, uint8 facialHair);
-@@ -2711,7 +2718,7 @@ class Player : public Unit
- 
-         void _SaveActions();
-         void _SaveAuras();
--        void _SaveInventory();
-+        bool _SaveInventory();
-         void _SaveMail();
-         void _SaveQuestStatus();
-         void _SaveDailyQuestStatus();
-@@ -2783,6 +2790,9 @@ class Player : public Unit
+@@ -2783,6 +2785,9 @@ class Player : public Unit
          uint32 m_ArenaTeamIdInvited;
  
          PlayerMails m_mail;

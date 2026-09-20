@@ -571,8 +571,15 @@ bool PlayerbotAIConfig::Initialize()
     retirementAuctionDiscountPercentPerAttempt = std::max(0, std::min(100,
         config.GetIntDefault("AiPlayerbot.Retirement.Auction.DiscountPerAttempt",
             config.GetIntDefault("AiPlayerbot.Retirement.AuctionDiscountPercentPerAttempt", 10))));
-    retirementAuctionDuration = std::max(uint32(MIN_AUCTION_TIME), static_cast<uint32>(std::max(1,
-        config.GetIntDefault("AiPlayerbot.Retirement.Auction.Duration", 43200))));
+    retirementAuctionDuration = static_cast<uint32>(std::max(1,
+        config.GetIntDefault("AiPlayerbot.Retirement.Auction.Duration", MIN_AUCTION_TIME)));
+    if (retirementAuctionDuration != MIN_AUCTION_TIME && retirementAuctionDuration != 2 * MIN_AUCTION_TIME &&
+        retirementAuctionDuration != 4 * MIN_AUCTION_TIME)
+    {
+        sLog.outError("AiPlayerbot.Retirement.Auction.Duration must use a normal 12/24/48-hour AH duration; retirement disabled");
+        retirementAuctionDuration = MIN_AUCTION_TIME;
+        retirementEnabled = false;
+    }
     retirementEstateBatchSize = std::max(1, config.GetIntDefault("AiPlayerbot.Retirement.BatchSize", 10));
     retirementCheckInterval = std::max(1, config.GetIntDefault("AiPlayerbot.Retirement.CheckInterval", 300));
     retirementMinMaxLevelTime = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.MinMaxLevelTime", 2592000));
@@ -594,7 +601,7 @@ bool PlayerbotAIConfig::Initialize()
     const std::string retirementDispositionValue = boost::algorithm::to_lower_copy(
         boost::algorithm::trim_copy(config.GetStringDefault("AiPlayerbot.Retirement.CharacterDisposition", "archive")));
     if (retirementDispositionValue == "delete")
-        retirementDisposition = RandomBotCharacterDisposition::DELETE;
+        retirementDisposition = RandomBotCharacterDisposition::DELETE_CHARACTER;
     else
     {
         retirementDisposition = RandomBotCharacterDisposition::ARCHIVE;

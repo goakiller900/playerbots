@@ -28,6 +28,7 @@ formats remain. Only durable tracked IDs enter the estate coordinator. A bidder
 on one is fenced from further opcodes/saves/logout only through DB acknowledgement
 or receipt reconciliation; all other player/AH behavior uses the original path.
 
+`ai_playerbot_lifecycle.sql` adds one compact lifecycle table and
 `ai_playerbot_estate.sql` adds eight InnoDB tables: broker registry, estate,
 exact-GUID lots, operation receipts, auction mapping, inherited bid claims,
 immutable bid revisions, and inheritance ledger. Historical auction/mail/player
@@ -35,7 +36,8 @@ reservations raise core ID generators after restart. Original GUIDs remain audit
 keys after deletion; item lots are never merged across estates.
 
 Intake escrows initial copper, consumes non-COD asset mail, adopts seller auctions
-and bidder obligations under a temporary fence, and transfers equipment,
+and bidder obligations under a temporary fence, adopts already-sold auctions
+that are still waiting for their normal seller payout, and transfers equipment,
 backpack/bag, bank/bank-bag leaf items without cloning or changing item identity.
 Detachment proves zero remaining money, owned items, inventory links, asset mail,
 and auction obligations. COD mail is held and logged, never discarded.
@@ -53,8 +55,15 @@ rechecks eligibility under a lock and cap/rounding excess becomes sink.
 Archive is permanently excluded. Delete first commits `DELETE_PENDING`, invokes
 the pinned core `Player::DeleteFromDB(..., true)`, and completes only after absence
 is proven. Replacement GUID/name/account/race/class/gender are reserved durably
-before the existing factory path. Recovery recognizes the exact created identity;
-the original need not exist while its estate continues liquidating.
+before the existing factory path. Recovery recognizes the exact created identity,
+saves and cleans up the factory object through the existing factory pattern, and
+refreshes the asynchronous login pool after confirmation. The original need not
+exist while its estate continues liquidating.
+
+`Retirement.Enabled` controls admission of new retirements. Once intake starts,
+turning it off does not strand detached assets: persisted intake and estate work
+continue. The compiled `ExecutionAllowed()` gate is the development-wide stop and
+remains closed in this branch.
 
 ## Crash boundary
 
@@ -71,8 +80,14 @@ mangos-wotlk `1cd9d566ae83c1a88f1b057514697055055f419c` only.
 
 ## Gate status
 
-The full new module/core surface has not compiled on Windows because CMake/Boost
-are unavailable. Fake-connection tests do not emulate MariaDB, live mail ownership,
-sessions, or character deletion. The exact Linux build and every isolated crash
-case remain mandatory. Until they pass, enabling retirement must log once and
-perform zero retirement mutations. See `lifecycle-validation.md`.
+Every modified/new PlayerBots translation unit and every modified pinned-core
+translation unit compiles on Windows with Zig's `x86_64-linux-gnu` C++ frontend
+against the exact core headers and Boost 1.74. Eight standalone C++ transaction/
+calculation executables and nine Python safety contracts pass. This is a strict
+compile/component check, not a linked mangosd build or MariaDB/runtime test.
+
+Fake-connection tests do not emulate MariaDB affected-row behavior, live mailbox
+ownership, disconnect timing, the world auction update loop, or character deletion.
+The exact linked Linux build and every isolated crash case remain mandatory.
+Until they pass, enabling retirement logs once and performs zero retirement
+mutations. See `lifecycle-validation.md`.

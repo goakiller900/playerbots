@@ -7,7 +7,8 @@ using R = RandomBotEstateAuctionResolution;
 bool Valid(R const& r)
 {
     if (r.kind < ESTATE_AUCTION_EXPIRED || r.kind > ESTATE_AUCTION_PAYOUT || !r.auctionId ||
-        !r.owner || !r.itemEntry || !r.itemCount || !r.mailId)
+        !r.owner || !r.itemEntry || !r.itemCount || !r.mailId ||
+        (r.claimWin && r.kind != ESTATE_AUCTION_WON))
         return false;
     if (r.kind == ESTATE_AUCTION_EXPIRED)
         return r.itemGuid && !r.bidder && !r.bid && !r.payoutAt;
@@ -40,7 +41,17 @@ bool Post(SqlConnection& c, R const& r)
         auto i=c.Query(("SELECT COUNT(*) FROM item_instance i INNER JOIN mail_items mi ON mi.item_guid=i.guid WHERE mi.mail_id="+
             std::to_string(r.mailId)+" AND i.guid="+std::to_string(r.itemGuid)+" AND i.owner_guid="+
             std::to_string(r.bidder)).c_str());
-        return a&&a->Fetch()[0].GetUInt32()==1&&i&&i->Fetch()[0].GetUInt32()==1;
+        if(!a||a->Fetch()[0].GetUInt32()!=1||!i||i->Fetch()[0].GetUInt32()!=1)
+            return false;
+        if(r.claimWin)
+        {
+            auto claim=c.Query(("SELECT COUNT(*) FROM ai_playerbot_estate_bid_claim WHERE auction_id="+
+                std::to_string(r.auctionId)+" AND broker_guid="+std::to_string(r.bidder)+" AND bid="+
+                std::to_string(r.bid)+" AND status=2 AND mail_id="+std::to_string(r.mailId)+" AND item_guid="+
+                std::to_string(r.itemGuid)).c_str());
+            return claim&&claim->Fetch()[0].GetUInt32()==1;
+        }
+        return true;
     }
     auto gone=c.Query(("SELECT COUNT(*) FROM auction WHERE id="+std::to_string(r.auctionId)).c_str());
     if(!gone || gone->Fetch()[0].GetUInt32()) return false;
@@ -65,19 +76,28 @@ std::future<bool> RandomBotEstateStore::CommitAuctionResolution(R r)
     {
         if(!Valid(r)) return false;
         auto engines=c.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND "
-            "table_name IN ('auction','mail','mail_items','item_instance','ai_playerbot_estate_auction') AND engine='InnoDB'");
-        if(!engines||engines->Fetch()[0].GetUInt32()!=5) return false;
+            "table_name IN ('auction','mail','mail_items','item_instance','ai_playerbot_estate_auction',"
+            "'ai_playerbot_estate_bid_claim') AND engine='InnoDB'");
+        if(!engines||engines->Fetch()[0].GetUInt32()!=6) return false;
         auto map=c.Query(("SELECT broker_guid,item_guid,item_entry,item_count,status,bidder,bid,deposit,auction_cut,expires_at,payout_at,"+
             std::string(MailColumn(r))+" FROM ai_playerbot_estate_auction WHERE auction_id="+std::to_string(r.auctionId)+" FOR UPDATE").c_str());
         if(!map) return false;
         Field* f=map->Fetch();
         const uint32 expectedStatus=r.kind==ESTATE_AUCTION_PAYOUT?1:0;
-        if(f[0].GetUInt32()!=r.owner||f[1].GetUInt32()!=r.itemGuid||f[2].GetUInt32()!=r.itemEntry||
+        if(f[0].GetUInt32()!=r.owner||(r.kind!=ESTATE_AUCTION_PAYOUT&&f[1].GetUInt32()!=r.itemGuid)||f[2].GetUInt32()!=r.itemEntry||
             f[3].GetUInt32()!=r.itemCount||f[4].GetUInt32()!=expectedStatus||f[5].GetUInt32()!=r.bidder||
             f[6].GetUInt32()!=r.bid||f[7].GetUInt32()!=r.deposit||
             f[8].GetUInt32()!=(r.kind==ESTATE_AUCTION_WON?0:r.cut)||
             f[9].GetUInt64()!=r.expiresAt||f[10].GetUInt64()!=(r.kind==ESTATE_AUCTION_WON?0:r.payoutAt)||
             f[11].GetUInt32()) return false;
+        if(r.claimWin)
+        {
+            auto claim=c.Query(("SELECT COUNT(*) FROM ai_playerbot_estate_bid_claim WHERE auction_id="+
+                std::to_string(r.auctionId)+" AND broker_guid="+std::to_string(r.bidder)+" AND bid="+
+                std::to_string(r.bid)+" AND status=0 FOR UPDATE").c_str());
+            if(!claim||claim->Fetch()[0].GetUInt32()!=1)
+                return false;
+        }
         auto a=c.Query(("SELECT itemowner,itemguid,item_template,item_count,buyguid,lastbid,deposit,time,moneyTime FROM auction WHERE id="+
             std::to_string(r.auctionId)+" FOR UPDATE").c_str());
         if(!a) return false;
@@ -91,6 +111,10 @@ std::future<bool> RandomBotEstateStore::CommitAuctionResolution(R r)
         if(!c.Execute(("UPDATE ai_playerbot_estate_auction SET status="+std::to_string(Status(r))+","+MailColumn(r)+"="+
             std::to_string(r.mailId)+",auction_cut="+std::to_string(r.cut)+",updated_at=UNIX_TIMESTAMP() WHERE auction_id="+
             std::to_string(r.auctionId)).c_str())) return false;
+        if(r.claimWin&&!c.Execute(("UPDATE ai_playerbot_estate_bid_claim SET status=2,mail_id="+
+            std::to_string(r.mailId)+",updated_at=UNIX_TIMESTAMP() WHERE auction_id="+
+            std::to_string(r.auctionId)+" AND broker_guid="+std::to_string(r.bidder)+" AND status=0").c_str()))
+            return false;
         return Post(c,r);
     });
 #endif

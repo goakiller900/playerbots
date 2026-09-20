@@ -6,8 +6,9 @@ namespace
 using R=RandomBotEstateAuctionMail;
 bool Valid(R const& r)
 {
-    return r.estateId&&r.lotId&&r.auctionId&&r.brokerGuid&&r.itemEntry&&r.itemCount&&r.mailId&&
-        ((r.status==2&&r.itemGuid&&!r.bid&&!r.cut)||(r.status==3&&!r.itemGuid&&r.bid&&r.cut<=uint64(r.bid)+r.deposit));
+    return r.estateId&&r.auctionId&&r.brokerGuid&&r.itemEntry&&r.itemCount&&r.mailId&&
+        ((r.status==2&&r.lotId&&r.itemGuid&&!r.bid&&!r.cut)||
+        (r.status==3&&r.bid&&r.cut<=uint64(r.bid)+r.deposit&&((r.lotId&&r.itemGuid)||(!r.lotId&&!r.itemGuid))));
 }
 uint64 Payout(R const& r){return uint64(r.bid)+r.deposit-r.cut;}
 #if defined(CMANGOS_ASYNC_TRANSACTION_CALLBACK) && CMANGOS_ASYNC_TRANSACTION_CALLBACK >= 4
@@ -62,8 +63,8 @@ std::future<bool> RandomBotEstateStore::ConsumeAuctionMail(R r)
                 ",auction_fees=auction_fees+"+std::to_string(r.deposit)+",updated_at=UNIX_TIMESTAMP() WHERE estate_id="+
                 std::to_string(r.estateId)+" AND auction_deposits>="+std::to_string(r.deposit)).c_str()))return false;
         }
-        else if(!c.Execute(("UPDATE ai_playerbot_estate_lot SET status=5,auction_id=0,updated_at=UNIX_TIMESTAMP() WHERE lot_id="+
-            std::to_string(r.lotId)).c_str())||!c.Execute(("UPDATE ai_playerbot_estate SET escrow=escrow+"+
+        else if((r.lotId&&!c.Execute(("UPDATE ai_playerbot_estate_lot SET status=5,auction_id=0,updated_at=UNIX_TIMESTAMP() WHERE lot_id="+
+            std::to_string(r.lotId)).c_str()))||!c.Execute(("UPDATE ai_playerbot_estate SET escrow=escrow+"+
             std::to_string(Payout(r))+",auction_income=auction_income+"+std::to_string(r.bid)+
             ",auction_deposits=auction_deposits-"+std::to_string(r.deposit)+",auction_cuts=auction_cuts+"+
             std::to_string(r.cut)+",updated_at=UNIX_TIMESTAMP() WHERE estate_id="+std::to_string(r.estateId)+

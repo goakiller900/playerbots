@@ -34,6 +34,7 @@ struct RandomBotEstateMailIntake
     uint64 estateId = 0;
     uint32 originalGuid = 0, originalAccount = 0, brokerGuid = 0, brokerAccount = 0, mailId = 0;
     uint64 money = 0;
+    uint32 auctionBid = 0, auctionDeposit = 0, auctionCut = 0;
     std::vector<RandomBotEstateMailItem> items;
 };
 
@@ -42,8 +43,8 @@ struct RandomBotEstateAuctionIntake
     uint64 estateId = 0;
     uint32 originalGuid = 0, brokerGuid = 0, auctionId = 0, houseId = 0;
     uint32 itemGuid = 0, itemEntry = 0, itemCount = 0, startBid = 0, buyout = 0;
-    uint32 bidder = 0, bid = 0, deposit = 0;
-    uint64 expiresAt = 0;
+    uint32 bidder = 0, bid = 0, deposit = 0, cut = 0;
+    uint64 expiresAt = 0, payoutAt = 0;
 };
 
 struct RandomBotEstateBidIntake
@@ -96,6 +97,7 @@ struct RandomBotEstateAuctionResolution
     uint32 bidder = 0, bid = 0, deposit = 0, cut = 0;
     uint32 mailId = 0;
     uint64 expiresAt = 0, payoutAt = 0;
+    bool claimWin = false;
 };
 
 struct RandomBotEstateAuctionMail
