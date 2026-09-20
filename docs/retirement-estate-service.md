@@ -3,7 +3,7 @@
 This is the authoritative implementation note for the Azeroth Retirement
 Organization design. `RandomBotLifecycleMgr::ExecutionAllowed()` remains the
 literal `false`; configuration and SQL cannot activate retirement before the
-isolated LAB02 acceptance gates pass.
+isolated lifecycle acceptance gates pass.
 
 ## Implemented architecture
 
@@ -73,6 +73,6 @@ mangos-wotlk `1cd9d566ae83c1a88f1b057514697055055f419c` only.
 
 The full new module/core surface has not compiled on Windows because CMake/Boost
 are unavailable. Fake-connection tests do not emulate MariaDB, live mail ownership,
-sessions, or character deletion. The exact Linux build and every LAB02 crash case
-remain mandatory. Until they pass, enabling retirement must log once and perform
-zero retirement mutations. See `lab02-lifecycle-validation.md`.
+sessions, or character deletion. The exact Linux build and every isolated crash
+case remain mandatory. Until they pass, enabling retirement must log once and
+perform zero retirement mutations. See `lifecycle-validation.md`.

@@ -1,5 +1,5 @@
 // Production return store with a scripted connection and queued MailDraft-save
-// double. Real core serialization and SQL semantics still require LAB02.
+// double. Real core serialization and SQL semantics still require isolated integration validation.
 #include "RandomBotLifecycleStore.h"
 #include "Database/DatabaseEnv.h"
 #include <cassert>

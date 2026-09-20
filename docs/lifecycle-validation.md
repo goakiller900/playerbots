@@ -1,13 +1,16 @@
-# LAB02 isolated lifecycle acceptance
+# Isolated lifecycle acceptance
 
-Never crash-test the populated live realm. Use the same host and MariaDB/core
-versions with cloned DBs, separate realm/config/ports, and the exact pinned source.
+Never crash-test a populated live realm. Use an isolated validation environment
+matching the target MariaDB/core versions, with cloned databases, separate
+realm/config/ports, and the exact pinned source.
 
 ## Build order
 
 ```sh
 set -eu
-cd /srv/cmangos/lab02-lifecycle/src/mangos-wotlk
+VALIDATION_ROOT=/srv/cmangos/lifecycle-validation
+
+cd "$VALIDATION_ROOT/src/mangos-wotlk"
 test "$(git rev-parse HEAD)" = 1cd9d566ae83c1a88f1b057514697055055f419c
 test -z "$(git status --porcelain --untracked-files=no)"
 git apply --check src/modules/PlayerBots/core-patches/0001-lifecycle-transaction-and-login-foundation.patch
@@ -15,30 +18,33 @@ git apply src/modules/PlayerBots/core-patches/0001-lifecycle-transaction-and-log
 git diff --check
 
 cmake -S src/modules/PlayerBots/tests/lifecycle \
-  -B /srv/cmangos/lab02-lifecycle/build-tests \
-  -DCMANGOS_CORE_SOURCE_DIR=/srv/cmangos/lab02-lifecycle/src/mangos-wotlk
-cmake --build /srv/cmangos/lab02-lifecycle/build-tests --parallel 2
-ctest --test-dir /srv/cmangos/lab02-lifecycle/build-tests --output-on-failure
+  -B "$VALIDATION_ROOT/build-tests" \
+  -DCMANGOS_CORE_SOURCE_DIR="$VALIDATION_ROOT/src/mangos-wotlk"
+cmake --build "$VALIDATION_ROOT/build-tests" --parallel 2
+ctest --test-dir "$VALIDATION_ROOT/build-tests" --output-on-failure
 python3 src/modules/PlayerBots/tests/lifecycle/test_safety_contract.py -v
 
-cmake -S . -B /srv/cmangos/lab02-lifecycle/build-core \
+cmake -S . -B "$VALIDATION_ROOT/build-core" \
   -DBUILD_PLAYERBOTS=ON -DPCH=OFF -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_INSTALL_PREFIX=/srv/cmangos/lab02-lifecycle/server
-cmake --build /srv/cmangos/lab02-lifecycle/build-core --parallel 2
+  -DCMAKE_INSTALL_PREFIX="$VALIDATION_ROOT/server"
+cmake --build "$VALIDATION_ROOT/build-core" --parallel 2
 ```
 
-Retain production dependency flags. Treat every warning/error in new estate/core
-files as a failure.
+Retain deployment-specific dependency flags. Treat every warning/error in new
+estate/core files as a failure.
 
 ## Schema and disabled startup
 
 Apply both character scripts twice to a disposable clone:
 
 ```sh
-mysql --login-path=lab02-lifecycle lab02_lifecycle_characters \
- < src/modules/PlayerBots/sql/characters/ai_playerbot_lifecycle.sql
-mysql --login-path=lab02-lifecycle lab02_lifecycle_characters \
- < src/modules/PlayerBots/sql/characters/ai_playerbot_estate.sql
+MYSQL_LOGIN_PATH=lifecycle-validation
+CHAR_DB=lifecycle_validation_characters
+
+mysql --login-path="$MYSQL_LOGIN_PATH" "$CHAR_DB" \
+  < src/modules/PlayerBots/sql/characters/ai_playerbot_lifecycle.sql
+mysql --login-path="$MYSQL_LOGIN_PATH" "$CHAR_DB" \
+  < src/modules/PlayerBots/sql/characters/ai_playerbot_estate.sql
 # repeat both, then verify all participating tables are InnoDB
 ```
 
@@ -54,8 +60,8 @@ the pinned realmd predicate (`active=1`, `expires_at=banned_at`), verify rejecte
 login, register exact faction/role rows, and configure all eight GUID/account
 options. Never reuse human/random accounts. Any mismatch must fail closed.
 
-Only after build/schema/disabled tests pass may a separate reviewed LAB branch
-change the literal gate. Restore the clone before every crash case.
+Only after build/schema/disabled tests pass may a separate reviewed change open
+the literal gate. Restore the clone before every crash case.
 
 ## Crash matrix
 

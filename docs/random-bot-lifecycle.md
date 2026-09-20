@@ -18,7 +18,7 @@ the existing architecture. It tracks max-level residence, selects gradually, and
 excludes pending/retired/service identities from every login path. Character
 finalization and the independent background estate are described in
 `retirement-estate-service.md`; isolated build/crash gates are in
-`lab02-lifecycle-validation.md`.
+`lifecycle-validation.md`.
 
 All new behavior defaults off. Retirement additionally has an immutable compiled
 safety gate returning `false`; it cannot execute until the exact Linux/MariaDB
