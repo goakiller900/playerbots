@@ -253,22 +253,23 @@ uint8 RandomPlayerbotFactory::GetRandomRace(uint8 cls, Team team)
     return availableRaces[cls].front();
 }
 
-bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace)
+bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace, uint32 reservedGuid,
+    std::string const& reservedName, int8 reservedGender)
 {
     std::lock_guard<std::mutex> lock(nameMutex);
     EnsureNamesInitialized();
 
     sLog.outDebug( "Creating new random bot for class %d", cls);
 
-    uint8 gender = urand(0, 1) ? GENDER_MALE : GENDER_FEMALE;
+    uint8 gender = reservedGender >= 0 ? uint8(reservedGender) : (urand(0, 1) ? GENDER_MALE : GENDER_FEMALE);
 
     uint8 race = inputRace == 0 ? GetRandomRace(cls) : inputRace;
 
     NameRaceAndGender raceAndGender = CombineRaceAndGender(gender, race);
 
-    std::string name;
+    std::string name = reservedName;
     auto it = freeNames.find(raceAndGender);
-    if (it == freeNames.end() || it->second.empty())
+    if (name.empty() && (it == freeNames.end() || it->second.empty()))
     {
         // Try fallback: generate new name with suffix if all names exhausted
         // First try other gender
@@ -277,7 +278,7 @@ bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace)
             return false;
         name = baseName;
     }
-    else
+    else if (name.empty())
     {
         uint32 i = urand(0, it->second.size() - 1);
         name = it->second[i];
@@ -363,7 +364,7 @@ bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace)
         sLog.outError("BOTS: Unable to create session or player for random acc %d - name: \"%s\"; race: %u; class: %u", accountId, name.c_str(), race, cls);
         return false;
     }
-	if (!player->Create(sObjectMgr.GeneratePlayerLowGuid(), name, race, cls, gender,
+    if (!player->Create(reservedGuid ? reservedGuid : sObjectMgr.GeneratePlayerLowGuid(), name, race, cls, gender,
 	        face.second, // skinColor,
 	        face.first,
 	        hair.first,
@@ -439,7 +440,11 @@ void RandomPlayerbotFactory::EnsureNamesInitialized()
 
     sLog.outString("Initializing random bot names...");
 
-    auto result = CharacterDatabase.PQuery("SELECT n.gender, n.name, e.guid FROM ai_playerbot_names n LEFT OUTER JOIN characters e ON e.name = n.name");
+    auto lifecycleSchema=CharacterDatabase.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='ai_playerbot_lifecycle'");
+    const bool hasReservations=lifecycleSchema&&lifecycleSchema->Fetch()[0].GetUInt32();
+    auto result = hasReservations ? CharacterDatabase.Query("SELECT n.gender,n.name,e.guid,l.guid FROM ai_playerbot_names n "
+        "LEFT JOIN characters e ON e.name=n.name LEFT JOIN ai_playerbot_lifecycle l ON l.replacement_name=n.name AND l.replacement_status=1") :
+        CharacterDatabase.Query("SELECT n.gender,n.name,e.guid,0 FROM ai_playerbot_names n LEFT JOIN characters e ON e.name=n.name");
     if (!result)
     {
         sLog.outError("No names found in ai_playerbot_names table");
@@ -455,7 +460,8 @@ void RandomPlayerbotFactory::EnsureNamesInitialized()
         NameRaceAndGender rg = static_cast<NameRaceAndGender>(fields[0].GetUInt8());
         std::string bname = fields[1].GetString();
         uint32 guidlo = fields[2].GetUInt32();
-        if (!guidlo)
+        uint32 reserved = fields[3].GetUInt32();
+        if (!guidlo && !reserved)
             freeNames[rg].push_back(bname);
         allNames[rg].push_back(bname);
         used[bname] = false;

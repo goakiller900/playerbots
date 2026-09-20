@@ -27,6 +27,7 @@
 #include "PlayerbotLoginMgr.h"
 #include "RandomBotLifecycle.h"
 #include "RandomBotEstateService.h"
+#include "RandomBotEstateAuctionMgr.h"
 #include "Entities/Transports.h"
 
 #ifndef MANGOSBOT_ZERO
@@ -649,6 +650,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
 #endif
 
+    // Poll acknowledged estate transactions even when random auto-login is
+    // disabled; a real player's tracked AH bid must always be released.
+    sRandomBotEstateAuctionMgr.Update();
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
 

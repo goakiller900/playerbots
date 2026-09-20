@@ -559,14 +559,26 @@ bool PlayerbotAIConfig::Initialize()
     retirementAllianceBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Alliance.Account", 0));
     retirementHordeBrokerGuid = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Horde.Guid", 0));
     retirementHordeBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.Horde.Account", 0));
+    retirementAllianceBidBrokerGuid = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.AllianceBidder.Guid", 0));
+    retirementAllianceBidBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.AllianceBidder.Account", 0));
+    retirementHordeBidBrokerGuid = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.HordeBidder.Guid", 0));
+    retirementHordeBidBrokerAccount = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.Broker.HordeBidder.Account", 0));
+    retirementAuctionEnabled = config.GetBoolDefault("AiPlayerbot.Retirement.Auction.Enabled", true);
+    const int legacyAuctionAttempts = config.GetIntDefault("AiPlayerbot.Retirement.AuctionAttempts", 3);
+    retirementAuctionMaxAttempts = std::max(1,
+        config.GetIntDefault("AiPlayerbot.Retirement.Auction.MaxAttempts", legacyAuctionAttempts));
+    retirementAuctionRepostDelay = std::max(60, config.GetIntDefault("AiPlayerbot.Retirement.Auction.RepostDelay", 3600));
+    retirementAuctionDiscountPercentPerAttempt = std::max(0, std::min(100,
+        config.GetIntDefault("AiPlayerbot.Retirement.Auction.DiscountPerAttempt",
+            config.GetIntDefault("AiPlayerbot.Retirement.AuctionDiscountPercentPerAttempt", 10))));
+    retirementAuctionDuration = std::max(uint32(MIN_AUCTION_TIME), static_cast<uint32>(std::max(1,
+        config.GetIntDefault("AiPlayerbot.Retirement.Auction.Duration", 43200))));
+    retirementEstateBatchSize = std::max(1, config.GetIntDefault("AiPlayerbot.Retirement.BatchSize", 10));
     retirementCheckInterval = std::max(1, config.GetIntDefault("AiPlayerbot.Retirement.CheckInterval", 300));
     retirementMinMaxLevelTime = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.MinMaxLevelTime", 2592000));
     retirementMaxPerCycle = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.MaxPerCycle", 1));
     retirementMaxLevelPopulationPercent = std::max(0, std::min(100,
         config.GetIntDefault("AiPlayerbot.Retirement.MaxLevelPopulationPercent", 35)));
-    retirementAuctionAttempts = std::max(0, config.GetIntDefault("AiPlayerbot.Retirement.AuctionAttempts", 3));
-    retirementAuctionDiscountPercentPerAttempt = std::max(0, std::min(100,
-        config.GetIntDefault("AiPlayerbot.Retirement.AuctionDiscountPercentPerAttempt", 10)));
     retirementGoldSinkMinPercent = std::max(0, std::min(100,
         config.GetIntDefault("AiPlayerbot.Retirement.GoldSinkMinPercent", 40)));
     retirementGoldSinkMaxPercent = std::max(0, std::min(100,

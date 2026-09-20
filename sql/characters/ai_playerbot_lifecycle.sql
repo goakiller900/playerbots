@@ -1,6 +1,6 @@
 -- Persistent random-bot retirement state and audit data.
 -- DEVELOPMENT SCHEMA: do not apply to production yet. Retirement execution
--- remains unavailable pending atomic liquidation and recovery integration.
+-- remains unavailable pending isolated Linux/MariaDB acceptance gates.
 -- This script is intentionally non-destructive so it can be applied to an
 -- existing characters database without resetting an in-progress lifecycle.
 

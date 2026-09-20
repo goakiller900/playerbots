@@ -8,21 +8,26 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SafetyContract(unittest.TestCase):
-    def test_no_unfinished_auction_coordinator_is_enabled(self):
+    def test_auction_coordinator_is_scoped_and_hard_gated(self):
         core = ROOT / ".core-reference"
         if not core.exists():
             self.skipTest("local pinned reference not present")
-        paths = ["src/game/AuctionHouse/" + name for name in
-                 ("AuctionHouseMgr.cpp", "AuctionHouseMgr.h", "AuctionHouseHandler.cpp")]
-        diff = subprocess.check_output(["git", "-C", str(core), "diff", "HEAD", "--", *paths], text=True)
-        self.assertEqual(diff, "")
-        self.assertFalse((ROOT / "playerbot/RandomBotLifecycleAuctionCoordinator.cpp").exists())
+        handler = (core / "src/game/AuctionHouse/AuctionHouseHandler.cpp").read_text()
+        manager = (ROOT / "playerbot/RandomBotEstateAuctionMgr.cpp").read_text()
+        gate = (ROOT / "playerbot/RandomBotLifecycle.h").read_text()
+        self.assertIn("sRandomBotEstateAuctionMgr.HandleBid", handler)
+        self.assertIn("if (!session || !auction || !IsTracked(auction->Id))", manager)
+        self.assertIn("RandomBotLifecycleMgr::ExecutionAllowed()", manager)
+        self.assertIn("static bool ExecutionAllowed() { return false; }", gate)
 
     def test_retirement_scheduler_still_hard_disabled(self):
         source = (ROOT / "playerbot/RandomBotLifecycle.cpp").read_text()
         update = source.split("void RandomBotLifecycleMgr::Update(", 1)[1]
         self.assertIn("No retirements or economic mutations will be performed.", update)
-        self.assertNotRegex(update, r"CommitAssetSave|PrepareEstate|DeliverInheritance|DeleteFromDB|CreateRandomBot")
+        gate = update.index("if (!ExecutionAllowed())")
+        scheduler = update.index("ScheduleWork();")
+        self.assertLess(gate, scheduler)
+        self.assertIn("return;", update[gate:scheduler])
         header = (ROOT / "playerbot/RandomBotLifecycle.h").read_text()
         self.assertIn("static bool ExecutionAllowed() { return false; }", header)
         core = ROOT / ".core-reference/src/game/AuctionHouse"
@@ -40,12 +45,15 @@ class SafetyContract(unittest.TestCase):
             for faction in ("Alliance", "Horde"):
                 for field in ("Guid", "Account"):
                     self.assertRegex(text, rf"(?m)^AiPlayerbot\.Retirement\.Broker\.{faction}\.{field}\s*=\s*0\s*$")
+            for faction in ("AllianceBidder", "HordeBidder"):
+                for field in ("Guid", "Account"):
+                    self.assertRegex(text, rf"(?m)^AiPlayerbot\.Retirement\.Broker\.{faction}\.{field}\s*=\s*0\s*$")
 
     def test_broker_schema_is_additive_and_survives_character_deletion(self):
         sql = (ROOT / "sql/characters/ai_playerbot_estate.sql").read_text()
         sql = re.sub(r"--[^\n]*", "", sql)
         statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
-        self.assertEqual(len(statements), 4)
+        self.assertEqual(len(statements), 8)
         for statement in statements:
             self.assertTrue(statement.startswith("CREATE TABLE IF NOT EXISTS `ai_playerbot_estate"))
             self.assertIn("ENGINE=InnoDB", statement)

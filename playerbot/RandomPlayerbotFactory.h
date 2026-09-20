@@ -63,7 +63,8 @@ class RandomPlayerbotFactory
 		virtual ~RandomPlayerbotFactory() {}
 
 	public:
-        bool CreateRandomBot(uint8 cls, uint8 inputRace = 0);
+        bool CreateRandomBot(uint8 cls, uint8 inputRace = 0, uint32 reservedGuid = 0,
+            std::string const& reservedName = std::string(), int8 reservedGender = -1);
         static void CreateRandomBots();
         static void CreateRandomGuilds();
         static void CreateRandomArenaTeams();

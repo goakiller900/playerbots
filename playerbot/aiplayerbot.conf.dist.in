@@ -233,6 +233,21 @@ AiPlayerbot.Retirement.Broker.Alliance.Guid = 0
 AiPlayerbot.Retirement.Broker.Alliance.Account = 0
 AiPlayerbot.Retirement.Broker.Horde.Guid = 0
 AiPlayerbot.Retirement.Broker.Horde.Account = 0
+AiPlayerbot.Retirement.Broker.AllianceBidder.Guid = 0
+AiPlayerbot.Retirement.Broker.AllianceBidder.Account = 0
+AiPlayerbot.Retirement.Broker.HordeBidder.Guid = 0
+AiPlayerbot.Retirement.Broker.HordeBidder.Account = 0
+
+# Background auction liquidation. These settings have no effect while
+# Retirement.Enabled=0 or while the compiled development safety gate is closed.
+# Legacy AuctionAttempts and AuctionDiscountPercentPerAttempt remain accepted as
+# fallbacks for the new nested names.
+AiPlayerbot.Retirement.Auction.Enabled = 1
+AiPlayerbot.Retirement.Auction.MaxAttempts = 5
+AiPlayerbot.Retirement.Auction.RepostDelay = 3600
+AiPlayerbot.Retirement.Auction.DiscountPerAttempt = 10
+AiPlayerbot.Retirement.Auction.Duration = 43200
+AiPlayerbot.Retirement.BatchSize = 10
 AiPlayerbot.Retirement.CheckInterval = 300
 AiPlayerbot.Retirement.MinMaxLevelTime = 2592000
 AiPlayerbot.Retirement.MaxPerCycle = 1
@@ -244,8 +259,8 @@ AiPlayerbot.Retirement.GoldSinkMaxPercent = 65
 AiPlayerbot.Retirement.InheritanceMinRecipients = 5
 AiPlayerbot.Retirement.InheritanceMaxRecipients = 20
 AiPlayerbot.Retirement.MaxInheritancePerBot = 10000000
-# If all configured accounts are full (common in archive mode), replacement
-# creation adds a recoverable account using RandomBotAccountPrefix.
+# Replacement uses a persisted identity on the retiring bot's existing random
+# account; it never creates or hijacks an account.
 AiPlayerbot.Retirement.CreateReplacement = 1
 
 # archive keeps the character and permanently excludes it from random login.

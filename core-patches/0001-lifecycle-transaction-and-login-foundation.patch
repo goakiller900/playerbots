@@ -27,6 +27,185 @@ index 008685db7..8f48d6747 100644
      auto queryResult = LoginDatabase.PQuery("SELECT 1 FROM account WHERE id='%u'", accid);
      if (!queryResult)
          return AOR_NAME_NOT_EXIST;                          // account doesn't exist
+diff --git a/src/game/AuctionHouse/AuctionHouseHandler.cpp b/src/game/AuctionHouse/AuctionHouseHandler.cpp
+index 843ded9f7..63793e789 100644
+--- a/src/game/AuctionHouse/AuctionHouseHandler.cpp
++++ b/src/game/AuctionHouse/AuctionHouseHandler.cpp
+@@ -25,6 +25,9 @@
+ #include "Entities/ObjectGuid.h"
+ #include "Entities/Player.h"
+ #include "AuctionHouse/AuctionHouseMgr.h"
++#ifdef ENABLE_PLAYERBOTS
++#include "playerbot/RandomBotEstateAuctionMgr.h"
++#endif
+ #include "Mails/Mail.h"
+ #include "Util/Util.h"
+ #include "Chat/Chat.h"
+@@ -438,6 +441,13 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recv_data)
+     if (price < auction->startbid)
+         return;
+ 
++#ifdef ENABLE_PLAYERBOTS
++    // Tracked estate auctions preserve the normal validation and wire-visible
++    // behavior above, but atomically journal buyer money, mail and auction state.
++    if (sRandomBotEstateAuctionMgr.HandleBid(this, auction, price))
++        return;
++#endif
++
+     SendAuctionCommandResult(auction, AUCTION_BID_PLACED, AUCTION_OK);
+ 
+     if (auction->UpdateBid(price, pl))
+diff --git a/src/game/AuctionHouse/AuctionHouseMgr.cpp b/src/game/AuctionHouse/AuctionHouseMgr.cpp
+index 6555ef6e7..8a77be5c3 100644
+--- a/src/game/AuctionHouse/AuctionHouseMgr.cpp
++++ b/src/game/AuctionHouse/AuctionHouseMgr.cpp
+@@ -33,6 +33,9 @@
+ #include "Server/WorldPacket.h"
+ #include "Server/WorldSession.h"
+ #include "Mails/Mail.h"
++#ifdef ENABLE_PLAYERBOTS
++#include "playerbot/RandomBotEstateAuctionMgr.h"
++#endif
+ 
+ #include "Policies/Singleton.h"
+ 
+@@ -64,7 +67,13 @@ AuctionHouseObject* AuctionHouseMgr::GetAuctionsMap(AuctionHouseEntry const* hou
+ 
+ uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem)
+ {
+-    float deposit = float(pItem->GetProto()->SellPrice * pItem->GetCount() * (time / MIN_AUCTION_TIME));
++    return GetAuctionDeposit(entry, time, pItem->GetProto(), pItem->GetCount());
++}
++
++uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time,
++    ItemPrototype const* proto, uint32 count)
++{
++    float deposit = float(proto->SellPrice * count * (time / MIN_AUCTION_TIME));
+ 
+     deposit = deposit * entry->depositPercent * 3.0f / 100.0f;
+ 
+@@ -473,6 +482,83 @@ bool AuctionHouseMgr::RemoveAItem(uint32 id)
+     return true;
+ }
+ 
++AuctionEntry* AuctionHouseMgr::FindAuction(uint32 auctionId)
++{
++    for (auto& auctions : mAuctions)
++        if (AuctionEntry* auction = auctions.GetAuction(auctionId))
++            return auction;
++    return nullptr;
++}
++
++bool AuctionHouseMgr::PublishBrokerAuctionFromDB(uint32 auctionId)
++{
++    if (!auctionId)
++        return false;
++    // Item fields must remain first and in Item::LoadFromDB order.
++    auto result = CharacterDatabase.PQuery(
++        "SELECT i.itemEntry,i.creatorGuid,i.giftCreatorGuid,i.count,i.duration,i.charges,i.flags,i.enchantments,"
++        "i.randomPropertyId,i.durability,i.playedTime,i.text,a.itemguid,a.houseid,a.itemowner,a.buyoutprice,"
++        "a.time,a.moneyTime,a.buyguid,a.lastbid,a.startbid,a.deposit,a.item_template,a.item_count,"
++        "a.item_randompropertyid FROM auction a INNER JOIN item_instance i ON i.guid=a.itemguid WHERE a.id=%u", auctionId);
++    if (!result)
++        return false;
++    Field* f = result->Fetch();
++    const uint32 itemGuid = f[12].GetUInt32();
++    const uint32 owner = f[14].GetUInt32();
++    AuctionHouseEntry const* house = sAuctionHouseStore.LookupEntry(f[13].GetUInt32());
++    ItemPrototype const* proto = ObjectMgr::GetItemPrototype(f[0].GetUInt32());
++    std::string ownerName;
++    std::wstring wideOwnerName;
++    if (!owner || !sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, owner), ownerName) ||
++        !Utf8toWStr(ownerName, wideOwnerName))
++        return false;
++    if (AuctionEntry* existing = FindAuction(auctionId))
++    {
++        if (existing->itemGuidLow != itemGuid || existing->itemTemplate != f[22].GetUInt32() ||
++            existing->itemCount != f[23].GetUInt32() || existing->auctionHouseEntry != house)
++            return false;
++        existing->owner = owner;
++        existing->ownerName = wideOwnerName;
++        existing->buyout = f[15].GetUInt32(); existing->expireTime = time_t(f[16].GetUInt64());
++        existing->moneyDeliveryTime = time_t(f[17].GetUInt64()); existing->bidder = f[18].GetUInt32();
++        existing->bid = f[19].GetUInt32(); existing->startbid = f[20].GetUInt32(); existing->deposit = f[21].GetUInt32();
++        return true;
++    }
++    if (!itemGuid || !house || !proto || GetAItem(itemGuid))
++        return false;
++    Item* item = NewItemOrBag(proto);
++    if (!item || !item->LoadFromDB(itemGuid, f, ObjectGuid(HIGHGUID_PLAYER, owner)))
++    {
++        delete item;
++        return false;
++    }
++    if (item->GetEntry() != f[22].GetUInt32() || item->GetCount() != f[23].GetUInt32() ||
++        item->GetItemRandomPropertyId() != f[24].GetInt32())
++    {
++        delete item;
++        return false;
++    }
++    AuctionEntry* auction = new AuctionEntry;
++    auction->Id = auctionId;
++    auction->itemGuidLow = itemGuid;
++    auction->itemTemplate = item->GetEntry();
++    auction->itemCount = item->GetCount();
++    auction->itemRandomPropertyId = item->GetItemRandomPropertyId();
++    auction->owner = owner;
++    auction->ownerName = wideOwnerName;
++    auction->buyout = f[15].GetUInt32();
++    auction->expireTime = time_t(f[16].GetUInt64());
++    auction->moneyDeliveryTime = time_t(f[17].GetUInt64());
++    auction->bidder = f[18].GetUInt32();
++    auction->bid = f[19].GetUInt32();
++    auction->startbid = f[20].GetUInt32();
++    auction->deposit = f[21].GetUInt32();
++    auction->auctionHouseEntry = house;
++    AddAItem(item);
++    GetAuctionsMap(house)->AddAuction(auction);
++    return true;
++}
++
+ void AuctionHouseMgr::Update()
+ {
+     for (auto& mAuction : mAuctions)
+@@ -563,6 +649,15 @@ void AuctionHouseObject::Update()
+     ///- Handle expired auctions
+     for (AuctionEntryMap::iterator itr = AuctionsMap.begin(); itr != AuctionsMap.end();)
+     {
++#ifdef ENABLE_PLAYERBOTS
++        // The estate service owns the entire expiry/win/payout transaction for
++        // tracked IDs. Ordinary auctions continue through the original path.
++        if (sRandomBotEstateAuctionMgr.HandleExpiration(itr->second, curTime))
++        {
++            ++itr;
++            continue;
++        }
++#endif
+         if (itr->second->moneyDeliveryTime)                 // pending auction
+         {
+             if (curTime > itr->second->moneyDeliveryTime)
+diff --git a/src/game/AuctionHouse/AuctionHouseMgr.h b/src/game/AuctionHouse/AuctionHouseMgr.h
+index b8192d815..bfd8f580d 100644
+--- a/src/game/AuctionHouse/AuctionHouseMgr.h
++++ b/src/game/AuctionHouse/AuctionHouseMgr.h
+@@ -181,6 +181,8 @@ class AuctionHouseMgr
+         static void SendAuctionSuccessfulMail(AuctionEntry* auction);
+         void SendAuctionExpiredMail(AuctionEntry* auction);
+         static uint32 GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem);
++        static uint32 GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time,
++            ItemPrototype const* proto, uint32 count);
+ 
+         static uint32 GetAuctionHouseTeam(AuctionHouseEntry const* house);
+         static AuctionHouseEntry const* GetAuctionHouseEntry(Unit* unit);
+@@ -192,6 +194,8 @@ class AuctionHouseMgr
+ 
+         void AddAItem(Item* it);
+         bool RemoveAItem(uint32 id);
++        bool PublishBrokerAuctionFromDB(uint32 auctionId);
++        AuctionEntry* FindAuction(uint32 auctionId);
+ 
+         void Update();
+ 
 diff --git a/src/game/Entities/CharacterHandler.cpp b/src/game/Entities/CharacterHandler.cpp
 index 0d85f3529..3eb18800d 100644
 --- a/src/game/Entities/CharacterHandler.cpp
@@ -172,7 +351,7 @@ index 24927391c..b889c21de 100644
      if (count < pItem->GetCount())              // need split items
      {
 diff --git a/src/game/Entities/Player.cpp b/src/game/Entities/Player.cpp
-index fcdf0c0cf..bceb7637a 100644
+index fcdf0c0cf..9ef1ef03d 100644
 --- a/src/game/Entities/Player.cpp
 +++ b/src/game/Entities/Player.cpp
 @@ -79,6 +79,7 @@
@@ -197,7 +376,18 @@ index fcdf0c0cf..bceb7637a 100644
      // for nonexistent account avoid update realm
      if (accountId == 0)
          updateRealmChars = false;
-@@ -18530,6 +18538,15 @@ void Player::SaveInventoryAndGoldToDB()
+@@ -18307,6 +18315,10 @@ bool Player::_LoadHomeBind(std::unique_ptr<QueryResult> queryResult)
+ 
+ void Player::SaveToDB()
+ {
++    // The estate-auction worker owns the exact money row until acknowledgement
++    // or durable receipt reconciliation. A normal save here could overwrite it.
++    if (m_estateAuctionPending)
++        return;
+     // we should assure this: ASSERT((m_nextSave != sWorld.getConfig(CONFIG_UINT32_INTERVAL_SAVE)));
+     // delay auto save at any saves (manual, in code, or autosave)
+     m_nextSave = sWorld.getConfig(CONFIG_UINT32_INTERVAL_SAVE);
+@@ -18530,6 +18542,15 @@ void Player::SaveInventoryAndGoldToDB()
      SaveGoldToDB();
  }
  
@@ -213,7 +403,7 @@ index fcdf0c0cf..bceb7637a 100644
  void Player::SaveGoldToDB() const
  {
      static SqlStatementID updateGold ;
-@@ -18703,7 +18720,7 @@ void Player::_SaveGlyphs()
+@@ -18703,7 +18724,7 @@ void Player::_SaveGlyphs()
      }
  }
  
@@ -222,7 +412,7 @@ index fcdf0c0cf..bceb7637a 100644
  {
      // force items in buyback slots to new state
      // and remove those that aren't already
-@@ -18738,7 +18755,7 @@ void Player::_SaveInventory()
+@@ -18738,7 +18759,7 @@ void Player::_SaveInventory()
  #endif
  
      // if no changes
@@ -231,7 +421,7 @@ index fcdf0c0cf..bceb7637a 100644
  
      // do not save if the update queue is corrupt
      bool error = false;
-@@ -18763,7 +18780,7 @@ void Player::_SaveInventory()
+@@ -18763,7 +18784,7 @@ void Player::_SaveInventory()
      {
          sLog.outError("Player::_SaveInventory - one or more errors occurred save aborted!");
          ChatHandler(this).SendSysMessage(LANG_ITEM_SAVE_FAILED);
@@ -240,7 +430,7 @@ index fcdf0c0cf..bceb7637a 100644
      }
  
      for (auto item : m_itemUpdateQueue)
-@@ -18773,6 +18790,7 @@ void Player::_SaveInventory()
+@@ -18773,6 +18794,7 @@ void Player::_SaveInventory()
          SaveItemToInventory(item);
      }
      m_itemUpdateQueue.clear();
@@ -248,7 +438,7 @@ index fcdf0c0cf..bceb7637a 100644
  }
  
  void Player::_SaveMail()
-@@ -25945,4 +25963,4 @@ void Player::SetPet(Unit* pet)
+@@ -25945,4 +25967,4 @@ void Player::SetPet(Unit* pet)
  {
      Unit::SetPet(pet);
      ApplyModByteFlag(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTES_OFFSET_FLAGS, PLAYER_FIELD_BYTE_CONTROLLING_PET, pet != nullptr);
@@ -256,12 +446,15 @@ index fcdf0c0cf..bceb7637a 100644
 \ No newline at end of file
 +}
 diff --git a/src/game/Entities/Player.h b/src/game/Entities/Player.h
-index 3dca42005..c65e3cc74 100644
+index 3dca42005..cc4440781 100644
 --- a/src/game/Entities/Player.h
 +++ b/src/game/Entities/Player.h
-@@ -1610,6 +1610,11 @@ class Player : public Unit
+@@ -1609,7 +1609,14 @@ class Player : public Unit
+         /*********************************************************/
  
          void SaveToDB();
++        bool IsEstateAuctionPending() const { return m_estateAuctionPending; }
++        void SetEstateAuctionPending(bool pending) { m_estateAuctionPending = pending; }
          void SaveInventoryAndGoldToDB();                    // fast save function for item/money cheating preventing
 +        // Opt-in combined save; requires an existing database transaction.
 +        // Includes bank changes through the ordinary inventory update queue.
@@ -271,7 +464,7 @@ index 3dca42005..c65e3cc74 100644
          void SaveGoldToDB() const;
          static void SetUInt32ValueInArray(Tokens& tokens, uint16 index, uint32 value);
          static void Customize(ObjectGuid guid, uint8 gender, uint8 skin, uint8 face, uint8 hairStyle, uint8 hairColor, uint8 facialHair);
-@@ -2711,7 +2716,7 @@ class Player : public Unit
+@@ -2711,7 +2718,7 @@ class Player : public Unit
  
          void _SaveActions();
          void _SaveAuras();
@@ -280,11 +473,46 @@ index 3dca42005..c65e3cc74 100644
          void _SaveMail();
          void _SaveQuestStatus();
          void _SaveDailyQuestStatus();
+@@ -2783,6 +2790,9 @@ class Player : public Unit
+         uint32 m_ArenaTeamIdInvited;
+ 
+         PlayerMails m_mail;
++        // Set only while an acknowledged transaction for a tracked retirement
++        // auction owns this character's persisted money preimage.
++        bool m_estateAuctionPending = false;
+         PlayerSpellMap m_spells;
+         PlayerTalentMap m_talents[MAX_TALENT_SPEC_COUNT];
+         uint32 m_lastPotionId;                              // last used health/mana potion in combat, that block next potion use
+diff --git a/src/game/Globals/ObjectMgr.h b/src/game/Globals/ObjectMgr.h
+index 3a611b1e1..f234e25d8 100644
+--- a/src/game/Globals/ObjectMgr.h
++++ b/src/game/Globals/ObjectMgr.h
+@@ -873,6 +873,7 @@ class ObjectMgr
+         uint32 GenerateStaticGameObjectLowGuid() { if (m_StaticGameObjectGuids.GetNextAfterMaxUsed() >= m_FirstTemporaryGameObjectGuid) return 0; return m_StaticGameObjectGuids.Generate(); }
+ 
+         uint32 GeneratePlayerLowGuid()   { return m_CharGuids.Generate();     }
++        void EnsurePlayerGuidAbove(uint32 used) { if (m_CharGuids.GetNextAfterMaxUsed() <= used) m_CharGuids.Set(used + 1); }
+         uint32 GenerateItemLowGuid()     { return m_ItemGuids.Generate();     }
+         uint32 GenerateCorpseLowGuid()   { return m_CorpseGuids.Generate();   }
+         uint32 GenerateInstanceLowGuid() { return m_InstanceGuids.Generate(); }
+@@ -880,10 +881,12 @@ class ObjectMgr
+ 
+         uint32 GenerateArenaTeamId() { return m_ArenaTeamIds.Generate(); }
+         uint32 GenerateAuctionID() { return m_AuctionIds.Generate(); }
++        void EnsureAuctionIdAbove(uint32 used) { if (m_AuctionIds.GetNextAfterMaxUsed() <= used) m_AuctionIds.Set(used + 1); }
+         uint64 GenerateEquipmentSetGuid() { return m_EquipmentSetIds.Generate(); }
+         uint32 GenerateGuildId() { return m_GuildIds.Generate(); }
+         // uint32 GenerateItemTextID() { return m_ItemTextIds.Generate(); }Id
+         uint32 GenerateMailID() { return m_MailIds.Generate(); }
++        void EnsureMailIdAbove(uint32 used) { if (m_MailIds.GetNextAfterMaxUsed() <= used) m_MailIds.Set(used + 1); }
+         uint32 GeneratePetNumber() { return m_PetNumbers.Generate(); }
+ 
+         MailLevelReward const* GetMailLevelReward(uint32 level, uint32 raceMask)
 diff --git a/src/game/Mails/Mail.cpp b/src/game/Mails/Mail.cpp
-index 84293c01d..8a8334a53 100644
+index 84293c01d..510be5e90 100644
 --- a/src/game/Mails/Mail.cpp
 +++ b/src/game/Mails/Mail.cpp
-@@ -246,6 +246,45 @@ void MailDraft::SendReturnToSender(uint32 sender_acc, ObjectGuid sender_guid, Ob
+@@ -246,6 +246,81 @@ void MailDraft::SendReturnToSender(uint32 sender_acc, ObjectGuid sender_guid, Ob
   * @param checked              The mask used to specify the mail.
   * @param deliver_delay        The delay after which the mail is delivered in seconds
   */
@@ -302,6 +530,42 @@ index 84293c01d..8a8334a53 100644
 +    AppendDeliveryToDB(mailId, receiverGuid, sender, MAIL_CHECK_MASK_COPIED,
 +        deliverTime, deliverTime + expireDelay, !m_items.empty());
 +    return true;
++}
++
++void MailDraft::PublishQueuedAuctionDelivery(uint32 mailId, ObjectGuid receiverGuid,
++    MailSender const& sender, time_t deliverTime)
++{
++    Player* receiver = sObjectMgr.GetPlayer(receiverGuid, false);
++    if (!receiver)
++    {
++        if (!m_items.empty())
++            deleteIncludedItems();
++        return;
++    }
++    if (receiver->GetMail(mailId))
++        return;
++    const time_t expireTime = deliverTime + (m_items.empty() && !m_money ? HOUR : 30 * DAY);
++    Mail* mail = new Mail;
++    mail->messageID = mailId;
++    mail->mailTemplateId = GetMailTemplateId();
++    mail->subject = GetSubject();
++    mail->body = GetBody();
++    mail->money = GetMoney();
++    mail->COD = GetCOD();
++    for (auto const& entry : m_items)
++        mail->AddItem(entry.second->GetGUIDLow(), entry.second->GetEntry());
++    mail->messageType = sender.GetMailMessageType();
++    mail->stationery = sender.GetStationery();
++    mail->sender = sender.GetSenderId();
++    mail->receiverGuid = receiverGuid;
++    mail->expire_time = expireTime;
++    mail->deliver_time = deliverTime;
++    mail->checked = MAIL_CHECK_MASK_COPIED;
++    mail->state = MAIL_STATE_UNCHANGED;
++    receiver->AddNewMailDeliverTime(deliverTime);
++    receiver->AddMail(mail);
++    for (auto const& entry : m_items)
++        receiver->AddMItem(entry.second);
 +}
 +
 +void MailDraft::AppendDeliveryToDB(uint32 mailId, ObjectGuid receiverGuid,
@@ -330,7 +594,7 @@ index 84293c01d..8a8334a53 100644
  void MailDraft::SendMailTo(MailReceiver const& receiver, MailSender const& sender, MailCheckMask checked, uint32 deliver_delay)
  {
      Player* pReceiver = receiver.GetPlayer();               // can be nullptr
-@@ -283,24 +322,9 @@ void MailDraft::SendMailTo(MailReceiver const& receiver, MailSender const& sende
+@@ -283,24 +358,9 @@ void MailDraft::SendMailTo(MailReceiver const& receiver, MailSender const& sende
  
      time_t expire_time = deliver_time + expire_delay;
  
@@ -358,10 +622,10 @@ index 84293c01d..8a8334a53 100644
  
      // For online receiver update in game mail status and data
 diff --git a/src/game/Mails/Mail.h b/src/game/Mails/Mail.h
-index af00f3411..61f98600d 100644
+index af00f3411..3541162c5 100644
 --- a/src/game/Mails/Mail.h
 +++ b/src/game/Mails/Mail.h
-@@ -247,7 +247,16 @@ class MailDraft
+@@ -247,7 +247,20 @@ class MailDraft
      public:                                                 // finishers
          void SendReturnToSender(uint32 sender_acc, ObjectGuid sender_guid, ObjectGuid receiver_guid);
          void SendMailTo(MailReceiver const& receiver, MailSender const& sender, MailCheckMask checked = MAIL_CHECK_MASK_NONE, uint32 deliver_delay = 0);
@@ -371,6 +635,10 @@ index af00f3411..61f98600d 100644
 +        // may be online; its mailbox must not be published before that boundary.
 +        bool QueueAuctionDelivery(uint32 mailId, ObjectGuid receiverGuid,
 +            MailSender const& sender, time_t deliverTime);
++        // Publish a delivery already committed by QueueAuctionDelivery. Safe to
++        // call repeatedly after receipt-based ambiguous-commit reconciliation.
++        void PublishQueuedAuctionDelivery(uint32 mailId, ObjectGuid receiverGuid,
++            MailSender const& sender, time_t deliverTime);
      private:
 +        void AppendDeliveryToDB(uint32 mailId, ObjectGuid receiverGuid,
 +            MailSender const& sender, MailCheckMask checked, time_t deliverTime,
@@ -378,6 +646,46 @@ index af00f3411..61f98600d 100644
          MailDraft(MailDraft const&);                        // trap decl, no body, mail draft must cloned only explicitly...
          MailDraft& operator=(MailDraft const&);             // trap decl, no body, ...because items clone is high price operation
  
+diff --git a/src/game/Server/WorldSession.cpp b/src/game/Server/WorldSession.cpp
+index e39f28d2b..cb39277ee 100644
+--- a/src/game/Server/WorldSession.cpp
++++ b/src/game/Server/WorldSession.cpp
+@@ -623,6 +623,14 @@ void WorldSession::LogoutPlayer()
+     if (m_playerRecentlyLogout)
+         return;
+ 
++#ifdef ENABLE_PLAYERBOTS
++    // A tracked estate-auction bid is normally resolved within one DB worker
++    // round trip. Defer logout so its exact persisted money preimage remains
++    // owned by that transaction. Ordinary players/auctions never set the flag.
++    if (_player && _player->IsEstateAuctionPending())
++        return;
++#endif
++
+     // finish pending transfers before starting the logout
+     while (_player && _player->IsBeingTeleportedFar())
+         HandleMoveWorldportAckOpcode();
+@@ -1221,6 +1229,13 @@ void WorldSession::SendRedirectClient(std::string& ip, uint16 port) const
+ 
+ void WorldSession::ExecuteOpcode(OpcodeHandler const& opHandle, WorldPacket& packet)
+ {
++#ifdef ENABLE_PLAYERBOTS
++    // Prevent a second inventory/money mutation while a tracked auction bid is
++    // unresolved. Network/world updates continue and the session is released
++    // immediately after acknowledgement/reconciliation.
++    if (_player && _player->IsEstateAuctionPending())
++        return;
++#endif
+     // need prevent do internal far teleports in handlers because some handlers do lot steps
+     // or call code that can do far teleports in some conditions unexpectedly for generic way work code
+     if (_player)
+@@ -1372,4 +1387,4 @@ void WorldSession::SetNoAnticheat()
+ {
+     m_anticheat.reset(new NullSessionAnticheat(this));
+ }
+-#endif
+\ No newline at end of file
++#endif
 diff --git a/src/game/World/World.cpp b/src/game/World/World.cpp
 index bfdc99bad..c45e96ce9 100644
 --- a/src/game/World/World.cpp
@@ -400,6 +708,39 @@ index bfdc99bad..c45e96ce9 100644
  #ifndef BUILD_AHBOT
      auctionbot.Init();
  #endif
+diff --git a/src/shared/Database/AcknowledgedTransaction.h b/src/shared/Database/AcknowledgedTransaction.h
+new file mode 100644
+index 000000000..1486a7473
+--- /dev/null
++++ b/src/shared/Database/AcknowledgedTransaction.h
+@@ -0,0 +1,27 @@
++#ifndef CMANGOS_ACKNOWLEDGED_TRANSACTION_H
++#define CMANGOS_ACKNOWLEDGED_TRANSACTION_H
++
++// Caller owns the connection lock. No database pools or world objects are used.
++// False includes an ambiguous COMMIT: reconcile a durable receipt before retry.
++// Kept independent of core headers for fault-injection tests with a fake connection.
++template<class Connection, class Body>
++bool RunAcknowledgedTransaction(Connection& connection, Body&& body)
++{
++    try
++    {
++        if (!connection.BeginTransaction())
++            return false;
++        if (body(connection) && connection.CommitTransaction())
++            return true;
++        connection.RollbackTransaction();
++    }
++    catch (...)
++    {
++        // Preserve failure even if a disconnected rollback also throws.
++        try { connection.RollbackTransaction(); }
++        catch (...) {}
++    }
++    return false;
++}
++
++#endif
 diff --git a/src/shared/Database/Database.cpp b/src/shared/Database/Database.cpp
 index 3f7e81f70..c7bbd3d79 100644
 --- a/src/shared/Database/Database.cpp
@@ -575,35 +916,3 @@ index a249c2864..73920a869 100644
          SqlQueryHolder() {}
          virtual ~SqlQueryHolder();
          bool SetQuery(size_t index, const char* sql);
-diff --git a/src/shared/Database/AcknowledgedTransaction.h b/src/shared/Database/AcknowledgedTransaction.h
-new file mode 100644
---- /dev/null
-+++ b/src/shared/Database/AcknowledgedTransaction.h
-@@ -0,0 +1,27 @@
-+#ifndef CMANGOS_ACKNOWLEDGED_TRANSACTION_H
-+#define CMANGOS_ACKNOWLEDGED_TRANSACTION_H
-+
-+// Caller owns the connection lock. No database pools or world objects are used.
-+// False includes an ambiguous COMMIT: reconcile a durable receipt before retry.
-+// Kept independent of core headers for fault-injection tests with a fake connection.
-+template<class Connection, class Body>
-+bool RunAcknowledgedTransaction(Connection& connection, Body&& body)
-+{
-+    try
-+    {
-+        if (!connection.BeginTransaction())
-+            return false;
-+        if (body(connection) && connection.CommitTransaction())
-+            return true;
-+        connection.RollbackTransaction();
-+    }
-+    catch (...)
-+    {
-+        // Preserve failure even if a disconnected rollback also throws.
-+        try { connection.RollbackTransaction(); }
-+        catch (...) {}
-+    }
-+    return false;
-+}
-+
-+#endif

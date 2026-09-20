@@ -17,6 +17,7 @@ struct Field
     std::string text = {};
     uint64 GetUInt64() const { return value; }
     uint32 GetUInt32() const { return static_cast<uint32>(value); }
+    int32 GetInt32() const { return static_cast<int32>(value); }
     bool GetBool() const { return value != 0; }
     std::string GetCppString() const { return text; }
 };

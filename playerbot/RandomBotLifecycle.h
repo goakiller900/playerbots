@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
+#include <future>
 #include "RandomBotLifecycleStore.h"
 
 class Player;
@@ -41,6 +42,7 @@ private:
     RandomBotLifecycleMgr() = default;
 
     void RefreshExcludedBots();
+    void ScheduleWork();
 
 private:
     mutable std::mutex exclusionMutex;
@@ -51,6 +53,10 @@ private:
     bool schemaAvailable = false;
     bool exclusionsAvailable = false;
     bool exclusionsFailed = false;
+    bool workPending = false;
+    std::future<bool> workResult;
+    time_t nextWorkAt = 0;
+    time_t nextEligibilityAt = 0;
 };
 
 #define sRandomBotLifecycleMgr RandomBotLifecycleMgr::instance()
