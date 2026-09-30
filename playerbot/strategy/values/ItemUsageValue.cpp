@@ -115,6 +115,24 @@ ItemUsage ItemUsageValue::Calculate()
     if (forceUsage == ForceItemUsage::FORCE_USAGE_BAG)
         return ItemUsage::ITEM_USAGE_KEEP;
 
+    ProfessionCraftingPlan professionPlan = AI_VALUE(ProfessionCraftingPlan, "profession crafting plan");
+    auto plannedReagent = professionPlan.required.find(itemId);
+    if (ProfessionCraftingPlanValue::IsEnabledFor(ai) && plannedReagent != professionPlan.required.end())
+    {
+        uint32 current = ai->GetInventoryItemsCountWithId(itemId);
+        if (current < plannedReagent->second)
+            return ItemUsage::ITEM_USAGE_SKILL;
+
+        // Keep a useful but bounded reserve. If inventory exceeds it, fall
+        // through to normal equip/use/AH/vendor handling; sellers re-evaluate
+        // after each stack, so they stop once the reserve remains.
+        uint32 reserve = std::max(plannedReagent->second,
+            std::min<uint32>(sPlayerbotAIConfig.professionMaterialTarget,
+                std::max<uint32>(1, proto->GetMaxStackSize())));
+        if (current <= reserve)
+            return ItemUsage::ITEM_USAGE_KEEP;
+    }
+
     if (bot->GetGuildId())
     {
         std::vector<GuildShareItemEntry> shareList = AI_VALUE(std::vector<GuildShareItemEntry>, "guild share list");
@@ -978,6 +996,10 @@ bool ItemUsageValue::IsItemUsefulForSkill(ItemPrototype const* proto)
             return true;
 #ifndef MANGOSBOT_ZERO
         if (ai->HasSkill(SKILL_JEWELCRAFTING) && IsItemUsedBySkill(proto, SKILL_JEWELCRAFTING))
+            return true;
+#endif
+#ifdef MANGOSBOT_TWO
+        if (ai->HasSkill(SKILL_INSCRIPTION) && IsItemUsedBySkill(proto, SKILL_INSCRIPTION))
             return true;
 #endif
         if (ai->HasSkill(SKILL_MINING) &&
